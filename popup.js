@@ -10,16 +10,27 @@ document.addEventListener("DOMContentLoaded", () => {
   const openWidgetBtn = document.getElementById("open-widget");
   const docsLink = document.getElementById("docs-link");
   const tabNotice = document.getElementById("tab-notice");
+  const tabNoticeMsg = document.getElementById("tab-notice-msg");
+  const openStoreBtn = document.getElementById("open-store-btn");
 
   const DEFAULT_BACKEND = "https://live-dressing-api.onrender.com";
 
-  function showNotice(text, isError = true) {
-    if (!tabNotice) return;
-    tabNotice.textContent = text;
+  function showNotice(text, type = "warn", showStoreBtn = false) {
+    if (!tabNotice || !tabNoticeMsg) return;
+    tabNoticeMsg.textContent = text;
+    tabNotice.className = `notice-box ${type}`;
     tabNotice.style.display = "block";
-    tabNotice.style.color = isError ? "#fca5a5" : "#6ee7b7";
-    tabNotice.style.background = isError ? "rgba(239, 68, 68, 0.12)" : "rgba(16, 185, 129, 0.12)";
-    tabNotice.style.borderColor = isError ? "rgba(239, 68, 68, 0.25)" : "rgba(16, 185, 129, 0.25)";
+    if (openStoreBtn) {
+      openStoreBtn.style.display = showStoreBtn ? "block" : "none";
+    }
+  }
+
+  // Demo store launcher
+  if (openStoreBtn) {
+    openStoreBtn.addEventListener("click", () => {
+      chrome.tabs.create({ url: "https://www.zara.com" });
+      window.close();
+    });
   }
 
   // Load configured backend URL
@@ -75,40 +86,86 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // Open Widget in Active Tab safely
-  openWidgetBtn.addEventListener("click", () => {
+  // Open Widget in Active Tab safely with auto-injection
+  openWidgetBtn.addEventListener("click", async () => {
     if (tabNotice) tabNotice.style.display = "none";
 
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       const activeTab = tabs && tabs[0];
+
       if (!activeTab || !activeTab.id) {
-        showNotice("No active browser tab found.");
+        showNotice("No active browser tab found.", "error");
         return;
       }
 
       const url = activeTab.url || "";
 
-      // 1. Restricted browser pages (chrome://, edge://, about:)
-      if (
+      // 1. Check if user is on chrome:// or restricted page
+      const isRestricted =
+        !url ||
         url.startsWith("chrome://") ||
         url.startsWith("chrome-extension://") ||
         url.startsWith("edge://") ||
         url.startsWith("about:") ||
-        url.startsWith("view-source:")
-      ) {
-        showNotice("⚠️ Please open a fashion shopping site (e.g., Zara, Uniqlo) to try on clothes!");
+        url.startsWith("view-source:") ||
+        url.startsWith("https://chromewebstore.google.com");
+
+      if (isRestricted) {
+        const pageName = url.startsWith("chrome://") ? "chrome://extensions" : "system settings";
+        showNotice(
+          `⚠️ Extensions cannot run on ${pageName}. Please open a fashion website to try on clothes!`,
+          "warn",
+          true // show "Open Zara Demo Store" button
+        );
         return;
       }
 
-      // 2. Send message with callback to consume runtime.lastError safely
-      chrome.tabs.sendMessage(activeTab.id, { type: "DECART_POPUP_OPEN" }, (response) => {
-        if (chrome.runtime.lastError) {
-          // Content script not yet attached (e.g. page was loaded before extension was loaded)
-          showNotice("🔄 Please refresh this shopping page once to activate Live Dressing!");
-        } else {
+      // 2. Try sending message to existing content script
+      chrome.tabs.sendMessage(activeTab.id, { type: "DECART_POPUP_OPEN" }, async (response) => {
+        if (!chrome.runtime.lastError && response && response.ok) {
           window.close();
+          return;
+        }
+
+        // 3. If content script is missing, auto-inject it via chrome.scripting
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: activeTab.id },
+            files: [
+              "crash_reports.js",
+              "button-detector.js",
+              "config.js",
+              "revolve.js",
+              "ugg.js",
+              "guess.js",
+              "factory54.js",
+              "uniqlo.js",
+              "loropiana.js",
+              "per_website_garment_filter.js",
+              "widget-core.js",
+              "content.js",
+            ],
+          });
+
+          // Small delay then trigger open
+          setTimeout(() => {
+            chrome.tabs.sendMessage(activeTab.id, { type: "DECART_POPUP_OPEN" }, () => {
+              window.close();
+            });
+          }, 150);
+        } catch (injectErr) {
+          console.warn("[Live Dressing] Script injection failed:", injectErr);
+          showNotice(
+            "🔄 Please refresh this page once so Live Dressing can activate!",
+            "error",
+            false
+          );
         }
       });
-    });
+    } catch (err) {
+      console.error("[Live Dressing] Popup error:", err);
+      showNotice("An error occurred while opening the fitting room.", "error");
+    }
   });
 });

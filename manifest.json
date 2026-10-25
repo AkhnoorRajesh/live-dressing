@@ -68,6 +68,6 @@
       "matches": ["<all_urls>"]
     }
   ],
-  "permissions": ["activeTab", "storage"],
+  "permissions": ["activeTab", "storage", "tabs", "scripting"],
   "host_permissions": ["<all_urls>"]
 }

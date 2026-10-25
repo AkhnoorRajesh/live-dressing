@@ -65,11 +65,28 @@ def fetch_garment_image(garment_url_or_base64: str) -> Image.Image:
         return Image.open(io.BytesIO(base64.b64decode(data))).convert("RGB")
     elif garment_url_or_base64.startswith("http://") or garment_url_or_base64.startswith("https://"):
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Sec-Fetch-Dest": "image",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Site": "cross-site",
         }
-        resp = requests.get(garment_url_or_base64, headers=headers, timeout=15)
-        resp.raise_for_status()
-        return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        if "pinimg.com" in garment_url_or_base64 or "pinterest" in garment_url_or_base64:
+            headers["Referer"] = "https://www.pinterest.com/"
+            headers["Origin"] = "https://www.pinterest.com"
+        elif "zara.com" in garment_url_or_base64 or "static.zara.net" in garment_url_or_base64:
+            headers["Referer"] = "https://www.zara.com/"
+
+        try:
+            resp = requests.get(garment_url_or_base64, headers=headers, timeout=15)
+            resp.raise_for_status()
+            return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        except Exception as e:
+            # Fallback retry without origin
+            headers.pop("Origin", None)
+            resp = requests.get(garment_url_or_base64, headers=headers, timeout=15)
+            resp.raise_for_status()
+            return Image.open(io.BytesIO(resp.content)).convert("RGB")
     else:
         raise ValueError("Invalid garment image source (must be http/https URL or data:image base64)")
 

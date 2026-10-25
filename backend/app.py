@@ -4,11 +4,13 @@ Provides high-performance REST endpoints for the 'Live Dressing' Chrome Extensio
 """
 
 import base64
+from datetime import datetime, timezone
 import io
 import os
 import time
+import requests
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from PIL import Image  # type: ignore
@@ -58,6 +60,131 @@ def health_check():
         "timestamp": time.time(),
         "hardware": get_system_status(),
     }
+
+
+# ==========================================
+# Extension Session & Token Endpoints
+# ==========================================
+
+@app.api_route("/api/tokens", methods=["GET", "POST"])
+async def get_tokens(request: Request):
+    """
+    Session token dispenser for Live Dressing Chrome Extension.
+    Called by widget.bundle.js fetchDecartToken().
+    """
+    now = time.time()
+    issued_at = datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
+    # 7-day expiration so the session stays active
+    expires_at = datetime.fromtimestamp(now + 86400 * 7, tz=timezone.utc).isoformat()
+
+    return {
+        "apiKey": f"ld_live_session_{int(now)}",
+        "expiresAt": expires_at,
+        "issuedAt": issued_at,
+        "modelName": "live-dressing-v1",
+        "webrtcConnectTimeoutSeconds": 60,
+        "decartQueueSilenceTimeoutSeconds": 60,
+        "sessionInactivitySeconds": 300,
+        "firstAiFrameTimeoutSeconds": 15,
+        "billing_enabled": False,
+        "status": "active",
+    }
+
+
+@app.api_route("/api/queue/join", methods=["GET", "POST"])
+async def queue_join(request: Request):
+    """
+    Direct admission queue: bypasses waiting rooms with immediate active status.
+    """
+    now = time.time()
+    issued_at = datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
+    expires_at = datetime.fromtimestamp(now + 86400 * 7, tz=timezone.utc).isoformat()
+
+    return {
+        "status": "active",
+        "ticket_id": f"ld_ticket_{int(now)}",
+        "position": 0,
+        "poll_ms": 1000,
+        "token": {
+            "apiKey": f"ld_live_session_{int(now)}",
+            "expiresAt": expires_at,
+            "issuedAt": issued_at,
+            "modelName": "live-dressing-v1",
+        },
+    }
+
+
+@app.api_route("/api/queue/status", methods=["GET", "POST"])
+def queue_status():
+    return {"status": "active", "position": 0}
+
+
+@app.api_route("/api/queue/heartbeat", methods=["GET", "POST"])
+def queue_heartbeat():
+    return {"status": "ok"}
+
+
+@app.api_route("/api/queue/leave", methods=["GET", "POST"])
+def queue_leave():
+    return {"status": "ok"}
+
+
+# ==========================================
+# Image Proxy Endpoint
+# ==========================================
+
+@app.get("/api/proxy-image")
+def proxy_image(url: str = ""):
+    """
+    CORS proxy for product images from Zara, Uniqlo, etc.
+    Allows clothing textures to be processed without browser canvas tainting.
+    """
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing image url parameter")
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        }
+        resp = requests.get(url, headers=headers, timeout=12)
+        content_type = resp.headers.get("content-type", "image/jpeg")
+        return Response(
+            content=resp.content,
+            media_type=content_type,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Image proxy error: {str(e)}")
+
+
+# ==========================================
+# Free Tier & Billing Shield Endpoints
+# ==========================================
+
+@app.api_route("/api/consumer-billing/status", methods=["GET", "POST"])
+def billing_status():
+    return {
+        "status": "active",
+        "billing_enabled": False,
+        "unlimited": True,
+        "subscribed": True,
+        "free_pass_available": 9999,
+        "free_pass_remaining": 9999,
+        "tryon_sessions": 9999,
+    }
+
+
+@app.api_route("/api/consumer-billing/heartbeat", methods=["GET", "POST"])
+def billing_heartbeat():
+    return {"status": "active", "billing_enabled": False}
+
+
+@app.api_route("/api/log", methods=["GET", "POST"])
+def api_log():
+    return {"status": "ok"}
 
 
 @app.post("/api/tryon")

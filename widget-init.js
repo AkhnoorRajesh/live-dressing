@@ -4,19 +4,19 @@ var _inExtension="undefined"!=typeof chrome&&!!chrome.runtime&&!!chrome.runtime.
 // ========================================================
 async function _ldResolveImageBase64(urlOrData) {
   if (!urlOrData) return null;
-  if (typeof urlOrData === "string" && urlOrData.startsWith("data:image")) return urlOrData;
+  if (typeof urlOrData === 'string' && urlOrData.startsWith('data:image')) return urlOrData;
 
   // 1. Try background worker fetch (bypasses cross-origin CORS via extension host permissions)
-  if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
     try {
       const res = await new Promise(function(resolve) {
-        chrome.runtime.sendMessage({ type: "LIVE_DRESSING_FETCH_IMAGE", url: urlOrData }, function(r) {
+        chrome.runtime.sendMessage({ type: 'LIVE_DRESSING_FETCH_IMAGE', url: urlOrData }, function(r) {
           if (chrome.runtime.lastError) resolve(null);
           else resolve(r);
         });
       });
       if (res && res.dataUrl) {
-        console.log("[Live Dressing] Image resolved to base64 via extension worker");
+        console.log('[Live Dressing] Image resolved to base64 via extension background worker');
         return res.dataUrl;
       }
     } catch(e) {}
@@ -38,7 +38,7 @@ async function _ldResolveImageBase64(urlOrData) {
 
   // 3. Try Render CORS proxy
   try {
-    const proxyUrl = "https://live-dressing-api.onrender.com/api/proxy-image?url=" + encodeURIComponent(urlOrData);
+    const proxyUrl = 'https://live-dressing-api.onrender.com/api/proxy-image?url=' + encodeURIComponent(urlOrData);
     const resp = await fetch(proxyUrl);
     if (resp.ok) {
       const blob = await resp.blob();
@@ -57,208 +57,231 @@ async function _ldResolveImageBase64(urlOrData) {
 window.__liveDressingTryOn = async function(garmentUrl) {
   if (!garmentUrl) return;
   try { if (window.__decartDismissOverlay) window.__decartDismissOverlay(); } catch(e){}
-  console.log("[Live Dressing] Processing virtual try-on with garment:", String(garmentUrl).slice(0, 100));
+  console.log('[Live Dressing] Processing virtual try-on with garment:', String(garmentUrl).slice(0, 100));
 
-  var localVid = document.getElementById("local-video");
-  var remoteVid = document.getElementById("remote-video");
-  var shimmer = document.getElementById("shimmer");
-  if (shimmer) shimmer.style.display = "block";
+  var localVid = document.getElementById('local-video');
+  var remoteVid = document.getElementById('remote-video');
+  var mainArea = document.getElementById('main-area') || document.body;
+  var shimmer = document.getElementById('shimmer');
+  if (shimmer) shimmer.style.display = 'block';
+
+  // Ensure fitting room is active & live webcam stream stays running at 30 FPS!
+  if (mainArea) {
+    mainArea.classList.remove('ma-idle');
+    mainArea.classList.add('ma-active');
+  }
+  if (localVid) {
+    localVid.style.setProperty('display', 'block', 'important');
+    if (localVid.paused) try { localVid.play(); } catch(e){}
+  }
+  if (remoteVid) {
+    remoteVid.style.setProperty('display', 'block', 'important');
+    if (remoteVid.paused) try { remoteVid.play(); } catch(e){}
+  }
 
   try {
-    // 1. Capture user webcam frame (check remote-video or local-video)
-    var vid = (remoteVid && remoteVid.videoWidth > 0 && remoteVid.readyState >= 2) ? remoteVid : (localVid && localVid.videoWidth > 0 ? localVid : null);
-    if (!vid) {
-      console.warn("[Live Dressing] No active video stream to capture user frame");
-      return;
+    // 1. Wait for video frame if camera is still starting up
+    var vid = (localVid && localVid.videoWidth > 0) ? localVid : (remoteVid && remoteVid.videoWidth > 0 ? remoteVid : null);
+    if (!vid && localVid) {
+      for (var i = 0; i < 8; i++) {
+        await new Promise(function(r){ setTimeout(r, 100); });
+        if (localVid.videoWidth > 0) { vid = localVid; break; }
+      }
     }
 
-    var w = vid.videoWidth || 640;
-    var h = vid.videoHeight || 480;
-    var canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    var ctx = canvas.getContext("2d");
-    ctx.drawImage(vid, 0, 0, w, h);
-    var userFrameB64 = canvas.toDataURL("image/jpeg", 0.92);
+    var userFrameB64 = '';
+    if (vid && vid.videoWidth > 0) {
+      var w = vid.videoWidth || 640;
+      var h = vid.videoHeight || 480;
+      var canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(vid, 0, 0, w, h);
+      userFrameB64 = canvas.toDataURL('image/jpeg', 0.92);
+    }
 
     // 2. Resolve garment to base64
     var garmentB64 = await _ldResolveImageBase64(garmentUrl);
 
     // 3. Dispatch to Render Backend
-    var endpoint = (typeof LIVE_DRESSING_CONFIG !== "undefined" && LIVE_DRESSING_CONFIG.TRYON_ENDPOINT) 
-      || "https://live-dressing-api.onrender.com/api/tryon";
+    var endpoint = (typeof LIVE_DRESSING_CONFIG !== 'undefined' && LIVE_DRESSING_CONFIG.TRYON_ENDPOINT) 
+      || 'https://live-dressing-api.onrender.com/api/tryon';
 
-    console.log("[Live Dressing] Dispatching tryon payload to:", endpoint);
-    var resp = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        user_image: userFrameB64,
-        garment_url: garmentB64,
-        category: "upper_body"
-      })
+    console.log('[Live Dressing] Dispatching tryon payload to:', endpoint);
+    var data = null;
+    try {
+      var resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_image: userFrameB64 || garmentB64,
+          garment_url: garmentB64,
+          category: 'upper_body'
+        })
+      });
+      if (resp.ok) {
+        data = await resp.json();
+      } else {
+        console.warn('[Live Dressing] Backend HTTP status:', resp.status);
+      }
+    } catch(err) {
+      console.warn('[Live Dressing] Backend fetch error:', err);
+    }
+
+    // Determine garment source (clean transparent PNG from backend or resolved image)
+    var garmentImgSrc = (data && data.garment_png) ? data.garment_png : garmentB64;
+    var photoImgSrc = (data && data.image) ? data.image : null;
+    var pos = (data && data.position) ? data.position : { rel_x: 0.18, rel_y: 0.32, rel_w: 0.64 };
+
+    // Clean up any old layers
+    var oldAr = document.getElementById('__ld_live_ar_garment');
+    if (oldAr) oldAr.remove();
+    var oldPhoto = document.getElementById('__ld_photo_overlay');
+    if (oldPhoto) oldPhoto.remove();
+    var oldControls = document.getElementById('__ld_tryon_dock');
+    if (oldControls) oldControls.remove();
+
+    // 1. LIVE AR Garment Layer (Transparent PNG placed directly on live video)
+    var arLayer = document.createElement('img');
+    arLayer.id = '__ld_live_ar_garment';
+    arLayer.src = garmentImgSrc;
+    arLayer.alt = 'Live Fitted Garment';
+    
+    // Position centered over the user's upper body / chest
+    var topPct = Math.max(22, Math.min(50, (pos.rel_y || 0.32) * 100));
+    var widthPct = Math.max(45, Math.min(78, (pos.rel_w || 0.64) * 100));
+
+    arLayer.style.cssText = [
+      'position: absolute',
+      'left: 50%',
+      'transform: translateX(-50%)',
+      'top: ' + topPct.toFixed(1) + '%',
+      'width: ' + widthPct.toFixed(1) + '%',
+      'height: auto',
+      'z-index: 15',
+      'cursor: grab',
+      'touch-action: none',
+      'filter: drop-shadow(0 10px 28px rgba(0,0,0,0.50))',
+      'transition: opacity 0.3s ease',
+      'pointer-events: auto'
+    ].join(';');
+
+    // Make garment draggable on torso so user can micro-adjust collar/chest height
+    var isDragging = false, startY = 0, currentTop = topPct;
+    arLayer.addEventListener('pointerdown', function(e) {
+      isDragging = true;
+      startY = e.clientY;
+      arLayer.style.cursor = 'grabbing';
+      arLayer.setPointerCapture(e.pointerId);
+    });
+    arLayer.addEventListener('pointermove', function(e) {
+      if (!isDragging) return;
+      var dy = ((e.clientY - startY) / mainArea.clientHeight) * 100;
+      arLayer.style.top = (currentTop + dy).toFixed(1) + '%';
+    });
+    arLayer.addEventListener('pointerup', function(e) {
+      if (!isDragging) return;
+      isDragging = false;
+      currentTop = parseFloat(arLayer.style.top) || currentTop;
+      arLayer.style.cursor = 'grab';
+      try { arLayer.releasePointerCapture(e.pointerId); } catch(x){}
     });
 
-    var data = await resp.json();
-    if (data && (data.garment_png || data.image)) {
-      console.log("[Live Dressing] Try-on rendered successfully in " + data.processing_time_ms + "ms");
-      var mainArea = document.getElementById("main-area") || document.body;
+    mainArea.appendChild(arLayer);
 
-      // Keep live video running at 30 FPS!
-      if (localVid && localVid.paused) try { localVid.play(); } catch(e){}
-      if (remoteVid && remoteVid.paused) try { remoteVid.play(); } catch(e){}
-
-      // Clean up any old layers
-      var oldAr = document.getElementById("__ld_live_ar_garment");
-      if (oldAr) oldAr.remove();
-      var oldPhoto = document.getElementById("__ld_photo_overlay");
-      if (oldPhoto) oldPhoto.remove();
-      var oldControls = document.getElementById("__ld_tryon_dock");
-      if (oldControls) oldControls.remove();
-
-      // 1. LIVE AR Garment Layer (Transparent PNG aligned to user body)
-      var garmentImgSrc = data.garment_png || data.image;
-      var pos = data.position || { rel_x: 0.15, rel_y: 0.30, rel_w: 0.70 };
-
-      var arLayer = document.createElement("img");
-      arLayer.id = "__ld_live_ar_garment";
-      arLayer.src = garmentImgSrc;
-      arLayer.alt = "Live Fitted Garment";
-      var initLeft = Math.max(5, Math.min(60, pos.rel_x * 100));
-      var initTop = Math.max(15, Math.min(50, pos.rel_y * 100));
-      var initWidth = Math.max(30, Math.min(90, pos.rel_w * 100));
-      
-      arLayer.style.cssText = [
-        "position: absolute",
-        "left: " + initLeft.toFixed(1) + "%",
-        "top: " + initTop.toFixed(1) + "%",
-        "width: " + initWidth.toFixed(1) + "%",
-        "height: auto",
-        "z-index: 15",
-        "cursor: grab",
-        "touch-action: none",
-        "filter: drop-shadow(0 6px 16px rgba(0,0,0,0.40))",
-        "transition: opacity 0.3s ease",
-        "pointer-events: auto"
-      ].join(";");
-
-      // Make garment draggable on torso so user can micro-adjust fit
-      var isDragging = false, startX = 0, startY = 0, origLeft = initLeft, origTop = initTop;
-      arLayer.addEventListener("pointerdown", function(e) {
-        isDragging = true;
-        startX = e.clientX;
-        startY = e.clientY;
-        arLayer.style.cursor = "grabbing";
-        arLayer.setPointerCapture(e.pointerId);
-      });
-      arLayer.addEventListener("pointermove", function(e) {
-        if (!isDragging) return;
-        var dx = ((e.clientX - startX) / mainArea.clientWidth) * 100;
-        var dy = ((e.clientY - startY) / mainArea.clientHeight) * 100;
-        arLayer.style.left = (origLeft + dx).toFixed(1) + "%";
-        arLayer.style.top = (origTop + dy).toFixed(1) + "%";
-      });
-      arLayer.addEventListener("pointerup", function(e) {
-        if (!isDragging) return;
-        isDragging = false;
-        origLeft = parseFloat(arLayer.style.left) || origLeft;
-        origTop = parseFloat(arLayer.style.top) || origTop;
-        arLayer.style.cursor = "grab";
-        try { arLayer.releasePointerCapture(e.pointerId); } catch(x){}
-      });
-
-      mainArea.appendChild(arLayer);
-
-      // 2. Photo Composite Overlay (Hidden by default, shown when user clicks "Studio Photo")
-      var photoOverlay = document.createElement("img");
-      photoOverlay.id = "__ld_photo_overlay";
-      photoOverlay.src = data.image;
-      photoOverlay.style.cssText = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:14;display:none;pointer-events:none;";
+    // 2. Photo Composite Overlay (Hidden by default, shown when user clicks Studio Photo)
+    var photoOverlay = null;
+    if (photoImgSrc) {
+      photoOverlay = document.createElement('img');
+      photoOverlay.id = '__ld_photo_overlay';
+      photoOverlay.src = photoImgSrc;
+      photoOverlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:14;display:none;pointer-events:none;';
       mainArea.appendChild(photoOverlay);
+    }
 
-      // 3. Floating Control Dock at bottom of screen
-      var dock = document.createElement("div");
-      dock.id = "__ld_tryon_dock";
-      dock.style.cssText = [
-        "position: absolute",
-        "bottom: 24px",
-        "left: 50%",
-        "transform: translateX(-50%)",
-        "z-index: 25",
-        "display: flex",
-        "align-items: center",
-        "gap: 8px",
-        "background: rgba(18, 18, 18, 0.85)",
-        "backdrop-filter: blur(14px)",
-        "-webkit-backdrop-filter: blur(14px)",
-        "border: 1px solid rgba(255, 255, 255, 0.18)",
-        "padding: 6px 12px",
-        "border-radius: 30px",
-        "box-shadow: 0 8px 24px rgba(0,0,0,0.5)"
-      ].join(";");
+    // 3. Floating Control Dock at bottom of screen
+    var dock = document.createElement('div');
+    dock.id = '__ld_tryon_dock';
+    dock.style.cssText = [
+      'position: absolute',
+      'bottom: 24px',
+      'left: 50%',
+      'transform: translateX(-50%)',
+      'z-index: 25',
+      'display: flex',
+      'align-items: center',
+      'gap: 8px',
+      'background: rgba(18, 18, 18, 0.88)',
+      'backdrop-filter: blur(16px)',
+      '-webkit-backdrop-filter: blur(16px)',
+      'border: 1px solid rgba(255, 255, 255, 0.18)',
+      'padding: 6px 12px',
+      'border-radius: 30px',
+      'box-shadow: 0 8px 24px rgba(0,0,0,0.5)'
+    ].join(';');
 
-      // Mode: Live Mirror button
-      var liveBtn = document.createElement("button");
-      liveBtn.type = "button";
-      liveBtn.textContent = "Live Mirror";
-      liveBtn.style.cssText = "background:#fff;color:#000;border:none;padding:6px 14px;border-radius:20px;font-size:11px;font-weight:700;cursor:pointer;letter-spacing:0.02em;transition:all 0.15s ease;";
+    // Mode: Live Mirror button
+    var liveBtn = document.createElement('button');
+    liveBtn.type = 'button';
+    liveBtn.textContent = 'Live Mirror';
+    liveBtn.style.cssText = 'background:#fff;color:#000;border:none;padding:6px 14px;border-radius:20px;font-size:11px;font-weight:700;cursor:pointer;letter-spacing:0.02em;';
 
-      // Mode: Studio Photo button
-      var photoBtn = document.createElement("button");
-      photoBtn.type = "button";
-      photoBtn.textContent = "Studio Photo";
-      photoBtn.style.cssText = "background:transparent;color:rgba(255,255,255,0.75);border:none;padding:6px 14px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;letter-spacing:0.02em;transition:all 0.15s ease;";
+    // Mode: Studio Photo button (only if photo was generated)
+    if (photoOverlay) {
+      var photoBtn = document.createElement('button');
+      photoBtn.type = 'button';
+      photoBtn.textContent = 'Studio Photo';
+      photoBtn.style.cssText = 'background:transparent;color:rgba(255,255,255,0.75);border:none;padding:6px 14px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;letter-spacing:0.02em;';
 
       liveBtn.onclick = function() {
-        liveBtn.style.background = "#fff";
-        liveBtn.style.color = "#000";
-        liveBtn.style.fontWeight = "700";
-        photoBtn.style.background = "transparent";
-        photoBtn.style.color = "rgba(255,255,255,0.75)";
-        photoBtn.style.fontWeight = "600";
-        arLayer.style.display = "block";
-        photoOverlay.style.display = "none";
+        liveBtn.style.background = '#fff';
+        liveBtn.style.color = '#000';
+        photoBtn.style.background = 'transparent';
+        photoBtn.style.color = 'rgba(255,255,255,0.75)';
+        arLayer.style.display = 'block';
+        photoOverlay.style.display = 'none';
       };
 
       photoBtn.onclick = function() {
-        photoBtn.style.background = "#fff";
-        photoBtn.style.color = "#000";
-        photoBtn.style.fontWeight = "700";
-        liveBtn.style.background = "transparent";
-        liveBtn.style.color = "rgba(255,255,255,0.75)";
-        liveBtn.style.fontWeight = "600";
-        arLayer.style.display = "none";
-        photoOverlay.style.display = "block";
-      };
-
-      // Reset / Clear button
-      var resetBtn = document.createElement("button");
-      resetBtn.type = "button";
-      resetBtn.innerHTML = "&times; Reset Outfit";
-      resetBtn.style.cssText = "background:rgba(255,255,255,0.12);color:#ff6b6b;border:1px solid rgba(255,107,107,0.3);padding:6px 12px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;margin-left:4px;";
-      resetBtn.onclick = function() {
-        arLayer.remove();
-        photoOverlay.remove();
-        dock.remove();
+        photoBtn.style.background = '#fff';
+        photoBtn.style.color = '#000';
+        liveBtn.style.background = 'transparent';
+        liveBtn.style.color = 'rgba(255,255,255,0.75)';
+        arLayer.style.display = 'none';
+        photoOverlay.style.display = 'block';
       };
 
       dock.appendChild(liveBtn);
       dock.appendChild(photoBtn);
-      dock.appendChild(resetBtn);
-      mainArea.appendChild(dock);
     } else {
-      console.warn("[Live Dressing] Backend response without image:", data);
+      dock.appendChild(liveBtn);
     }
+
+    // Reset / Clear button
+    var resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.innerHTML = '&times; Reset Outfit';
+    resetBtn.style.cssText = 'background:rgba(255,255,255,0.12);color:#ff6b6b;border:1px solid rgba(255,107,107,0.3);padding:6px 12px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;margin-left:4px;';
+    resetBtn.onclick = function() {
+      arLayer.remove();
+      if (photoOverlay) photoOverlay.remove();
+      dock.remove();
+    };
+
+    dock.appendChild(resetBtn);
+    mainArea.appendChild(dock);
+
   } catch (err) {
-    console.error("[Live Dressing] Try-on error:", err);
+    console.error('[Live Dressing] Try-on error:', err);
   } finally {
-    if (shimmer) shimmer.style.display = "none";
+    if (shimmer) shimmer.style.display = 'none';
   }
 };
 
 // Also listen for garment selection / drop events
-window.addEventListener("message", function(e) {
-  if (e.data && e.data.type === "DECART_IMAGE_BTN_CLICK" && e.data.url) {
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'DECART_IMAGE_BTN_CLICK' && e.data.url) {
     window.__liveDressingTryOn(e.data.url);
   }
 });

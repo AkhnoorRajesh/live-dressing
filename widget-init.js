@@ -54,10 +54,155 @@ async function _ldResolveImageBase64(urlOrData) {
   return urlOrData;
 }
 
+// =====================================================================
+// LIVE DRESSING: ADVANCED CLIENT-SIDE SHAPE MASKING & ANCHORING ENGINE
+// =====================================================================
+
+/**
+ * Shape Masking Engine:
+ * Converts any clothing image into a clean, borderless alpha mask on a Canvas.
+ * Detects and removes white, light-grey, or solid studio backdrops and padding,
+ * and tightly crops to the clothing silhouette.
+ */
+async function _ldIsolateShapeAlpha(imgSrc) {
+  return new Promise(function(resolve) {
+    if (!imgSrc) return resolve('');
+    var img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = function() {
+      try {
+        var w = img.naturalWidth || img.width;
+        var h = img.naturalHeight || img.height;
+        if (!w || !h) return resolve(imgSrc);
+
+        var canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        var idata = ctx.getImageData(0, 0, w, h);
+        var data = idata.data;
+
+        // Sample 4 corners
+        var c1 = [data[0], data[1], data[2]];
+        var c2 = [data[(w - 1) * 4], data[(w - 1) * 4 + 1], data[(w - 1) * 4 + 2]];
+        var c3 = [data[((h - 1) * w) * 4], data[((h - 1) * w) * 4 + 1], data[((h - 1) * w) * 4 + 2]];
+        var c4 = [data[((h - 1) * w + w - 1) * 4], data[((h - 1) * w + w - 1) * 4 + 1], data[((h - 1) * w + w - 1) * 4 + 2]];
+
+        var bgR = Math.round((c1[0] + c2[0] + c3[0] + c4[0]) / 4);
+        var bgG = Math.round((c1[1] + c2[1] + c3[1] + c4[1]) / 4);
+        var bgB = Math.round((c1[2] + c2[2] + c3[2] + c4[2]) / 4);
+        var isLightBg = (bgR + bgG + bgB) / 3 > 175;
+
+        var minX = w, maxX = 0, minY = h, maxY = 0;
+
+        for (var i = 0; i < data.length; i += 4) {
+          var r = data[i], g = data[i+1], b = data[i+2], a = data[i+3];
+          if (a < 35) continue;
+
+          var dr = r - bgR, dg = g - bgG, db = b - bgB;
+          var dist = Math.sqrt(dr*dr + dg*dg + db*db);
+
+          // Remove light backdrops, white padding, or near-border colors
+          if ((isLightBg && (r > 235 && g > 235 && b > 235)) || dist < 30) {
+            data[i+3] = 0;
+          } else {
+            var px = (i / 4) % w;
+            var py = Math.floor((i / 4) / w);
+            if (px < minX) minX = px;
+            if (px > maxX) maxX = px;
+            if (py < minY) minY = py;
+            if (py > maxY) maxY = py;
+          }
+        }
+
+        ctx.putImageData(idata, 0, 0);
+
+        // Crop tightly to non-transparent silhouette with 4px padding
+        if (maxX > minX && maxY > minY) {
+          var pad = 4;
+          var cropX = Math.max(0, minX - pad);
+          var cropY = Math.max(0, minY - pad);
+          var cropW = Math.min(w - cropX, (maxX - minX) + pad * 2);
+          var cropH = Math.min(h - cropY, (maxY - minY) + pad * 2);
+
+          var cropCanvas = document.createElement('canvas');
+          cropCanvas.width = cropW;
+          cropCanvas.height = cropH;
+          var cropCtx = cropCanvas.getContext('2d');
+          cropCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+          return resolve(cropCanvas.toDataURL('image/png'));
+        }
+
+        resolve(canvas.toDataURL('image/png'));
+      } catch (e) {
+        console.warn('[Live Dressing] Shape mask fallback:', e);
+        resolve(imgSrc);
+      }
+    };
+    img.onerror = function() { resolve(imgSrc); };
+    img.src = imgSrc;
+  });
+}
+
+/**
+ * Client-Side Upper Chest / Neck Base Anchor Estimator:
+ * Uses camera skin centroid in upper torso to find exact clavicle notch (base of neck).
+ */
+function _ldDetectUserAnchors(videoEl) {
+  if (!videoEl || videoEl.videoWidth === 0) {
+    return { collar_anchor_x: 0.50, collar_anchor_y: 0.28, sh_span: 0.46, waist_anchor_x: 0.50, waist_anchor_y: 0.60 };
+  }
+  try {
+    var c = document.createElement('canvas');
+    c.width = 160; c.height = 120;
+    var ctx = c.getContext('2d');
+    ctx.drawImage(videoEl, 0, 0, 160, 120);
+    var data = ctx.getImageData(0, 0, 160, 120).data;
+    var skinX = 0, skinY = 0, count = 0;
+    var minX = 160, maxX = 0, minY = 120, maxY = 0;
+    var scanH = Math.floor(120 * 0.45);
+
+    for (var y = 6; y < scanH; y++) {
+      for (var x = 16; x < 144; x++) {
+        var idx = (y * 160 + x) * 4;
+        var r = data[idx], g = data[idx+1], b = data[idx+2];
+        if (r > 95 && g > 55 && b > 40 && r > g && g > b && (r - g) > 15) {
+          skinX += x; skinY += y; count++;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    if (count > 40) {
+      var cx = (skinX / count) / 160;
+      var faceH = ((maxY - minY) / 120);
+      var neckY = Math.min(0.36, Math.max(0.24, (minY / 120) + faceH * 1.15));
+      var shSpan = Math.max(0.38, Math.min(0.65, ((maxX - minX) / 160) * 2.5));
+      return {
+        collar_anchor_x: cx,
+        collar_anchor_y: neckY,
+        sh_span: shSpan,
+        waist_anchor_x: cx,
+        waist_anchor_y: Math.min(0.75, neckY + shSpan * 0.85)
+      };
+    }
+  } catch(e) {}
+  return { collar_anchor_x: 0.50, collar_anchor_y: 0.28, sh_span: 0.46, waist_anchor_x: 0.50, waist_anchor_y: 0.60 };
+}
+
 window.__liveDressingTryOn = async function(garmentUrl) {
   if (!garmentUrl) return;
+
+  // Rule 3: Strip any queue waiting dependencies & dismiss loading overlays instantly
+  window.__decartInQueue = false;
   try { if (window.__decartDismissOverlay) window.__decartDismissOverlay(); } catch(e){}
-  console.log('[Live Dressing] Processing virtual try-on with garment:', String(garmentUrl).slice(0, 100));
+  try { if (window.__decartCancelLoadingOverlay) window.__decartCancelLoadingOverlay(); } catch(e){}
+
+  console.log('[Live Dressing] Processing direct virtual try-on with garment:', String(garmentUrl).slice(0, 100));
 
   var localVid = document.getElementById('local-video');
   var remoteVid = document.getElementById('remote-video');
@@ -65,7 +210,7 @@ window.__liveDressingTryOn = async function(garmentUrl) {
   var shimmer = document.getElementById('shimmer');
   if (shimmer) shimmer.style.display = 'block';
 
-  // Ensure fitting room is active & live webcam stream stays running at 30 FPS!
+  // Ensure fitting room is active & live webcam stream stays running
   if (mainArea) {
     mainArea.classList.remove('ma-idle');
     mainArea.classList.add('ma-active');
@@ -80,11 +225,11 @@ window.__liveDressingTryOn = async function(garmentUrl) {
   }
 
   try {
-    // 1. Wait for video frame if camera is still starting up
+    // 1. Capture live camera frame
     var vid = (localVid && localVid.videoWidth > 0) ? localVid : (remoteVid && remoteVid.videoWidth > 0 ? remoteVid : null);
     if (!vid && localVid) {
-      for (var i = 0; i < 8; i++) {
-        await new Promise(function(r){ setTimeout(r, 100); });
+      for (var i = 0; i < 6; i++) {
+        await new Promise(function(r){ setTimeout(r, 80); });
         if (localVid.videoWidth > 0) { vid = localVid; break; }
       }
     }
@@ -98,13 +243,17 @@ window.__liveDressingTryOn = async function(garmentUrl) {
       canvas.height = h;
       var ctx = canvas.getContext('2d');
       ctx.drawImage(vid, 0, 0, w, h);
-      userFrameB64 = canvas.toDataURL('image/jpeg', 0.92);
+      userFrameB64 = canvas.toDataURL('image/jpeg', 0.90);
     }
 
-    // 2. Resolve garment to base64
-    var garmentB64 = await _ldResolveImageBase64(garmentUrl);
+    // Client-side upper chest / neck anchor fallback
+    var clientAnchors = _ldDetectUserAnchors(vid);
 
-    // Detect category hint from context (url keywords, alt text, page query)
+    // 2. Resolve garment to base64 & perform Rule 2 client-side shape alpha masking
+    var rawGarmentB64 = await _ldResolveImageBase64(garmentUrl);
+    var cleanShapePng = await _ldIsolateShapeAlpha(rawGarmentB64);
+
+    // Detect category hint from URL, alt text, or context
     var catHint = 'auto';
     var textContext = (garmentUrl + ' ' + (window.__ldLastGarmentAlt || '') + ' ' + (window.__decartHostPageUrl ? window.__decartHostPageUrl() : '') + ' ' + location.href).toLowerCase();
     if (/(pant|trouser|jean|chino|short|skirt|legging|cargo|bottom)/i.test(textContext)) {
@@ -113,19 +262,19 @@ window.__liveDressingTryOn = async function(garmentUrl) {
       catHint = 'upper_body';
     }
 
-    // 3. Dispatch to Render Backend
+    // 3. Dispatch to Render Backend Direct Pipeline
     var endpoint = (typeof LIVE_DRESSING_CONFIG !== 'undefined' && LIVE_DRESSING_CONFIG.TRYON_ENDPOINT) 
       || 'https://live-dressing-api.onrender.com/api/tryon';
 
-    console.log('[Live Dressing] Dispatching tryon payload to:', endpoint, 'category hint:', catHint);
+    console.log('[Live Dressing] Dispatching direct try-on payload to:', endpoint, 'category:', catHint);
     var data = null;
     try {
       var resp = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          user_image: userFrameB64 || garmentB64,
-          garment_url: garmentB64,
+          user_image: userFrameB64 || cleanShapePng,
+          garment_url: cleanShapePng || rawGarmentB64,
           category: catHint
         })
       });
@@ -135,15 +284,15 @@ window.__liveDressingTryOn = async function(garmentUrl) {
         console.warn('[Live Dressing] Backend HTTP status:', resp.status);
       }
     } catch(err) {
-      console.warn('[Live Dressing] Backend fetch error:', err);
+      console.warn('[Live Dressing] Direct backend fetch error:', err);
     }
 
-    // Determine garment source & warped layer
+    // Determine garment sources & category
     var warpedSrc = (data && data.warped_png) ? data.warped_png : null;
-    var garmentImgSrc = (data && data.garment_png) ? data.garment_png : garmentB64;
+    var garmentImgSrc = (data && data.garment_png) ? data.garment_png : cleanShapePng;
     var photoImgSrc = (data && data.image) ? data.image : null;
     var category = (data && data.category) ? data.category : catHint;
-    var pos = (data && data.position) ? data.position : (category === 'lower_body' ? { rel_x: 0.22, rel_y: 0.55, rel_w: 0.58 } : { rel_x: 0.18, rel_y: 0.30, rel_w: 0.64 });
+    var pos = (data && data.position) ? data.position : null;
 
     // Clean up any old layers
     var oldAr = document.getElementById('__ld_live_ar_garment');
@@ -153,14 +302,16 @@ window.__liveDressingTryOn = async function(garmentUrl) {
     var oldControls = document.getElementById('__ld_tryon_dock');
     if (oldControls) oldControls.remove();
 
-    // 1. LIVE AR Garment Layer
+    // =====================================================================
+    // Rule 1 & Rule 2: OVERLAY RENDERING ENGINE WITH STRICT ANCHOR MAPPING
+    // =====================================================================
     var arLayer = document.createElement('img');
     arLayer.id = '__ld_live_ar_garment';
     arLayer.alt = 'Live Fitted Garment';
 
     if (warpedSrc) {
-      // FULL FRAME PERSPECTIVE-WARPED OVERLAY:
-      // Perfectly mapped to the user's skeletal landmarks, shoulders, waist, and contours!
+      // 1. FULL-FRAME PERSPECTIVE-WARPED OVERLAY:
+      // Direct 1:1 camera-mapped transparent layer contoured to user's body
       arLayer.src = warpedSrc;
       arLayer.style.cssText = [
         'position: absolute',
@@ -170,32 +321,88 @@ window.__liveDressingTryOn = async function(garmentUrl) {
         'object-fit: cover',
         'z-index: 15',
         'pointer-events: none',
-        'filter: drop-shadow(0 6px 16px rgba(0,0,0,0.30))',
+        'filter: drop-shadow(0 6px 16px rgba(0,0,0,0.28))',
         'transition: opacity 0.25s ease'
       ].join(';');
     } else {
-      // 2D Positioning Fallback (Upper body at chest 30%, Lower body at hips 54%)
+      // 2. PRECISE ANCHOR-MAPPED SILHOUETTE OVERLAY:
+      // Top collar / neckline strictly anchored to upper chest / neck base
       arLayer.src = garmentImgSrc;
-      var defaultTop = (category === 'lower_body') ? 54 : 30;
-      var topPct = Math.max(15, Math.min(75, (pos.rel_y || (defaultTop / 100)) * 100));
-      var widthPct = Math.max(38, Math.min(80, (pos.rel_w || 0.62) * 100));
 
-      arLayer.style.cssText = [
-        'position: absolute',
-        'left: 50%',
-        'transform: translateX(-50%)',
-        'top: ' + topPct.toFixed(1) + '%',
-        'width: ' + widthPct.toFixed(1) + '%',
-        'height: auto',
-        'z-index: 15',
-        'cursor: grab',
-        'touch-action: none',
-        'filter: drop-shadow(0 10px 28px rgba(0,0,0,0.50))',
-        'transition: opacity 0.3s ease',
-        'pointer-events: auto'
-      ].join(';');
+      var collarX = 50;
+      var collarY = 28;
+      var waistX = 50;
+      var waistY = 60;
+      var targetWidth = 48;
+      var angleDeg = 0;
 
-      var isDragging = false, startY = 0, currentTop = topPct;
+      if (pos) {
+        if (pos.collar_anchor_x !== undefined) collarX = pos.collar_anchor_x * 100;
+        else if (pos.rel_x !== undefined && pos.rel_w !== undefined) collarX = (pos.rel_x + pos.rel_w * 0.5) * 100;
+
+        if (pos.collar_anchor_y !== undefined) collarY = pos.collar_anchor_y * 100;
+        else if (pos.rel_y !== undefined) collarY = pos.rel_y * 100;
+
+        if (pos.waist_anchor_x !== undefined) waistX = pos.waist_anchor_x * 100;
+        if (pos.waist_anchor_y !== undefined) waistY = pos.waist_anchor_y * 100;
+
+        if (pos.sh_span !== undefined) targetWidth = pos.sh_span * 100 * 1.25;
+        else if (pos.rel_w !== undefined) targetWidth = pos.rel_w * 100;
+
+        if (pos.angle_deg !== undefined) angleDeg = pos.angle_deg;
+      } else if (clientAnchors) {
+        collarX = clientAnchors.collar_anchor_x * 100;
+        collarY = clientAnchors.collar_anchor_y * 100;
+        targetWidth = clientAnchors.sh_span * 100 * 1.25;
+        waistX = clientAnchors.waist_anchor_x * 100;
+        waistY = clientAnchors.waist_anchor_y * 100;
+      }
+
+      if (category === 'lower_body') {
+        // Waistband Anchor: Anchors strictly to user hips / waistline
+        var finalWaistY = Math.max(45, Math.min(75, waistY));
+        var finalWaistW = Math.max(35, Math.min(75, targetWidth * 0.95));
+
+        arLayer.style.cssText = [
+          'position: absolute',
+          'left: ' + waistX.toFixed(1) + '%',
+          'top: ' + finalWaistY.toFixed(1) + '%',
+          'width: ' + finalWaistW.toFixed(1) + '%',
+          'height: auto',
+          'transform-origin: 50% 0%', // Top waistband is the strict anchor pivot
+          'transform: translate(-50%, 0%)',
+          'z-index: 15',
+          'cursor: grab',
+          'touch-action: none',
+          'filter: drop-shadow(0 8px 20px rgba(0,0,0,0.35))',
+          'transition: opacity 0.25s ease',
+          'pointer-events: auto'
+        ].join(';');
+      } else {
+        // Collar Anchor: Anchors top collar strictly to upper chest / neck base
+        // NOT the center of the screen, and NOT floating on the face!
+        var finalCollarY = Math.max(20, Math.min(42, collarY));
+        var finalCollarW = Math.max(42, Math.min(82, targetWidth));
+
+        arLayer.style.cssText = [
+          'position: absolute',
+          'left: ' + collarX.toFixed(1) + '%',
+          'top: ' + finalCollarY.toFixed(1) + '%',
+          'width: ' + finalCollarW.toFixed(1) + '%',
+          'height: auto',
+          'transform-origin: 50% 0%', // Top-center collar is the strict anchor pivot
+          'transform: translate(-50%, 0%) rotate(' + angleDeg.toFixed(1) + 'deg)',
+          'z-index: 15',
+          'cursor: grab',
+          'touch-action: none',
+          'filter: drop-shadow(0 8px 20px rgba(0,0,0,0.35))',
+          'transition: opacity 0.25s ease',
+          'pointer-events: auto'
+        ].join(';');
+      }
+
+      // Torso drag micro-adjustment
+      var isDragging = false, startY = 0, currentTop = (category === 'lower_body') ? finalWaistY : finalCollarY;
       arLayer.addEventListener('pointerdown', function(e) {
         isDragging = true;
         startY = e.clientY;
@@ -310,6 +517,9 @@ window.__liveDressingTryOn = async function(garmentUrl) {
 // Also listen for garment selection / drop events
 window.addEventListener('message', function(e) {
   if (e.data && e.data.type === 'DECART_IMAGE_BTN_CLICK' && e.data.url) {
+    if (e.data.category) window.__ldLastGarmentCategory = e.data.category;
+    if (e.data.title || e.data.alt) window.__ldLastGarmentAlt = (e.data.title || '') + ' ' + (e.data.alt || '');
     window.__liveDressingTryOn(e.data.url);
   }
 });
+

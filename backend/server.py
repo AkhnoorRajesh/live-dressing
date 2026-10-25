@@ -657,6 +657,17 @@ def warp_and_blend_garment(
         default_rel_y = 0.55 if category == "lower_body" else 0.30
         pos_info = {"x": 0, "y": 0, "width": w, "height": h, "rel_x": 0.2, "rel_y": default_rel_y, "rel_w": 0.6, "rel_h": 0.5, "category": category}
 
+    neck_pt = (l_sh + r_sh) / 2.0
+    angle_rad = math.atan2(r_sh[1] - l_sh[1], r_sh[0] - l_sh[0])
+    angle_deg = math.degrees(angle_rad)
+    hip_pt = (l_hip + r_hip) / 2.0
+    pos_info["collar_anchor_x"] = float(neck_pt[0] / w)
+    pos_info["collar_anchor_y"] = float(neck_pt[1] / h)
+    pos_info["waist_anchor_x"] = float(hip_pt[0] / w)
+    pos_info["waist_anchor_y"] = float(hip_pt[1] / h)
+    pos_info["sh_span"] = float(sh_span / w)
+    pos_info["angle_deg"] = float(angle_deg)
+
     warped_rgba_out = np.dstack([adjusted_rgb, smooth_alpha])
     return synthesized, warped_rgba_out, pos_info
 

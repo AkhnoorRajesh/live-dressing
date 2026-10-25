@@ -13,9 +13,9 @@ import sys
 sys.dont_write_bytecode = True
 import io
 import os
-import requests
-import numpy as np
-from PIL import Image, ImageOps, ImageFilter
+import requests  # type: ignore
+import numpy as np  # type: ignore
+from PIL import Image, ImageOps, ImageFilter  # type: ignore
 
 try:
     import cv2  # type: ignore

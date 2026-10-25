@@ -2,17 +2,19 @@
 Live Dressing - Advanced Virtual Try-On Backend Engine (server.py)
 ==================================================================
 Production-grade Computer Vision & MediaPipe Pose Warping Pipeline:
-1. Precise Garment Segmentation & Alpha Isolation:
-   - Removes backgrounds completely, isolating garment silhouettes without box edges.
-   - Strips model heads, trousers, and inpaints mirror-selfie phones/hands with fabric.
-2. Skeletal Landmark Anchoring & Dynamic Perspective Warping:
-   - Tracks shoulders (11 & 12), hips (23 & 24), neck, and nose with MediaPipe Pose.
-   - Dynamically warps garment width to match shoulder span, posture, tilt, and depth.
-3. Strict Exclusion & Ambient Lighting Blending:
-   - Multi-point exclusion masks keeping user's face, neck, hair, and hands in front.
-   - Adapts fabric luminance to ambient room lighting with contact shadowing.
-4. WebSocket Real-time Streaming Protocol:
-   - Clean /ws/tryon endpoint for high-FPS continuous base64 frame synthesis.
+1. Multi-Category Classification (Upper Body vs Lower Body / Pants).
+2. Precise Garment Segmentation & Artifact Removal:
+   - Removes background cleanly without rectangular bounding boxes or border slabs.
+   - Filters out studio border bars and photographer backdrops.
+   - Strips other models' faces/necks and inpaints mirror-selfie phones.
+3. Skeletal Landmark Anchoring & Dynamic Perspective Warping:
+   - Upper body (jackets, shirts, hoodies) anchored to shoulders (11 & 12) & hips (23 & 24).
+   - Lower body (pants, trousers, jeans) anchored to hips (23 & 24) & knees/ankles (never on chest!).
+4. Multi-Point Exclusion & Ambient Lighting Blending:
+   - Preserves user's real face, chin, neck notch, hands, and shirt.
+   - Dynamically matches garment fabric luminance to room lighting.
+5. Decart WebRTC & Queue Contract Compliance:
+   - Full mock endpoints for /api/queue/join, /api/queue/status, /api/tokens.
 """
 
 import sys
@@ -54,7 +56,7 @@ import uvicorn
 app = FastAPI(
     title="Live Dressing AI Engine",
     description="High-precision Skeletal Warping & Virtual Try-On Engine",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 app.add_middleware(
@@ -81,12 +83,10 @@ def get_model_task_path() -> Optional[str]:
     if os.path.exists(target_path):
         return target_path
 
-    # Try parent directory
     parent_path = os.path.join(os.path.dirname(curr_dir), MODEL_TASK_FILENAME)
     if os.path.exists(parent_path):
         return parent_path
 
-    # Download from Google MediaPipe models repository
     try:
         print(f"[PoseTracker] Downloading MediaPipe Pose asset to {target_path}...")
         urllib.request.urlretrieve(MODEL_TASK_URL, target_path)
@@ -100,7 +100,7 @@ def get_model_task_path() -> Optional[str]:
 
 
 class PoseTracker:
-    """Tracks skeletal landmarks using MediaPipe with safe heuristic fallbacks."""
+    """Tracks skeletal landmarks using MediaPipe with safe geometric fallbacks."""
 
     def __init__(self):
         self.detector = None
@@ -135,10 +135,10 @@ class PoseTracker:
     def extract_landmarks(self, img_rgb: np.ndarray) -> Tuple[Dict[str, np.ndarray], bool]:
         """
         Extracts key body coordinates:
-        - nose (landmark 0)
-        - l_sh (11), r_sh (12)
-        - l_hip (23), r_hip (24)
+        - nose (0), l_sh (11), r_sh (12)
         - l_wrist (15), r_wrist (16)
+        - l_hip (23), r_hip (24)
+        - l_knee (25), r_knee (26), l_ankle (27), r_ankle (28)
         Returns: (landmarks_dict, is_detected)
         """
         h, w = img_rgb.shape[:2]
@@ -149,9 +149,7 @@ class PoseTracker:
                 res = self.detector.detect(mp_img)
                 if res and res.pose_landmarks and len(res.pose_landmarks) > 0:
                     lms = res.pose_landmarks[0]
-                    # Landmark indices:
-                    # 0: Nose, 11: Left Shoulder, 12: Right Shoulder
-                    # 15: Left Wrist, 16: Right Wrist, 23: Left Hip, 24: Right Hip
+
                     def pt(idx: int) -> np.ndarray:
                         return np.array([lms[idx].x * w, lms[idx].y * h], dtype=np.float32)
 
@@ -160,10 +158,13 @@ class PoseTracker:
                     nose = pt(0)
                     l_hip = pt(23)
                     r_hip = pt(24)
+                    l_knee = pt(25)
+                    r_knee = pt(26)
+                    l_ankle = pt(27)
+                    r_ankle = pt(28)
                     l_wrist = pt(15)
                     r_wrist = pt(16)
 
-                    # Validate reasonable shoulder span
                     sh_span = np.linalg.norm(r_sh - l_sh)
                     if sh_span > 20:
                         return {
@@ -172,11 +173,15 @@ class PoseTracker:
                             "r_sh": r_sh,
                             "l_hip": l_hip,
                             "r_hip": r_hip,
+                            "l_knee": l_knee,
+                            "r_knee": r_knee,
+                            "l_ankle": l_ankle,
+                            "r_ankle": r_ankle,
                             "l_wrist": l_wrist,
                             "r_wrist": r_wrist,
                             "sh_span": float(sh_span),
                         }, True
-            except Exception as e:
+            except Exception:
                 pass
 
         # Robust Geometric Fallback using facial/skin centroid
@@ -192,6 +197,10 @@ class PoseTracker:
         torso_len = sh_span * 1.25
         l_hip = np.array([center_x - sh_span * 0.38, neck_y + torso_len], dtype=np.float32)
         r_hip = np.array([center_x + sh_span * 0.38, neck_y + torso_len], dtype=np.float32)
+        l_knee = np.array([l_hip[0], l_hip[1] + torso_len * 1.0], dtype=np.float32)
+        r_knee = np.array([r_hip[0], r_hip[1] + torso_len * 1.0], dtype=np.float32)
+        l_ankle = np.array([l_hip[0], l_hip[1] + torso_len * 2.0], dtype=np.float32)
+        r_ankle = np.array([r_hip[0], r_hip[1] + torso_len * 2.0], dtype=np.float32)
 
         return {
             "nose": nose,
@@ -199,6 +208,10 @@ class PoseTracker:
             "r_sh": r_sh,
             "l_hip": l_hip,
             "r_hip": r_hip,
+            "l_knee": l_knee,
+            "r_knee": r_knee,
+            "l_ankle": l_ankle,
+            "r_ankle": r_ankle,
             "l_wrist": np.array([-100.0, -100.0], dtype=np.float32),
             "r_wrist": np.array([-100.0, -100.0], dtype=np.float32),
             "sh_span": float(sh_span),
@@ -206,7 +219,6 @@ class PoseTracker:
 
     def _detect_face_fallback(self, img_rgb: np.ndarray) -> Tuple[int, int, int, int]:
         h, w = img_rgb.shape[:2]
-        # 1. Haar Cascade if present
         try:
             if cv2 is not None and hasattr(cv2, 'CascadeClassifier') and hasattr(cv2, 'data') and hasattr(cv2.data, 'haarcascades'):
                 cascade_path = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
@@ -220,7 +232,6 @@ class PoseTracker:
         except Exception:
             pass
 
-        # 2. Skin Centroid in Upper 40%
         try:
             r = img_rgb[:, :, 0].astype(float)
             g = img_rgb[:, :, 1].astype(float)
@@ -245,113 +256,153 @@ pose_tracker = PoseTracker()
 
 
 # =====================================================================
-# 2. Precise Garment Segmentation & Alpha Isolation
+# 2. Garment Category Detection & Alpha Isolation
 # =====================================================================
+
+def detect_garment_category(garment_pil: Image.Image, category_hint: str = "auto") -> str:
+    """
+    Intelligently classifies clothing into 'upper_body' (jacket/shirt/hoodie) or 'lower_body' (trousers/pants/jeans).
+    Uses keyword hints first, then image aspect ratio and horizontal profile leg-split analysis.
+    """
+    hint = (category_hint or "").lower().strip()
+    if hint in ("lower_body", "bottoms", "pants", "trousers", "jeans", "shorts", "chinos"):
+        return "lower_body"
+    if hint in ("upper_body", "tops", "jacket", "shirt", "hoodie", "blazer", "coat", "sweater"):
+        return "upper_body"
+
+    arr = np.array(garment_pil)
+    h, w = arr.shape[:2]
+    aspect_ratio = h / float(max(1, w))
+
+    # Check foreground
+    if arr.shape[-1] == 4 and np.count_nonzero(arr[:, :, 3] < 200) > 100:
+        alpha = arr[:, :, 3]
+    else:
+        r = arr[:, :, 0].astype(float)
+        g = arr[:, :, 1].astype(float)
+        b = arr[:, :, 2].astype(float)
+        lum = 0.299 * r + 0.587 * g + 0.114 * b
+        alpha = np.where(lum < 240, 255, 0).astype(np.uint8)
+
+    coords = np.argwhere(alpha > 40)
+    if len(coords) < 100:
+        return "lower_body" if aspect_ratio > 1.35 else "upper_body"
+
+    y0, x0 = coords.min(axis=0)
+    y1, x1 = coords.max(axis=0)
+    gw = max(10, x1 - x0)
+    gh = max(10, y1 - y0)
+    box_ar = gh / float(gw)
+
+    # Pants are elongated vertically and feature a leg inseam split in the bottom 45%
+    if box_ar >= 1.20:
+        lower_part = alpha[int(y0 + gh * 0.45):y1, x0:x1]
+        col_sums = np.sum(lower_part > 40, axis=0)
+        mid_x = len(col_sums) // 2
+        window = max(2, int(gw * 0.12))
+        mid_vals = col_sums[max(0, mid_x - window):min(len(col_sums), mid_x + window)]
+        min_mid = np.min(mid_vals) if len(mid_vals) > 0 else 0
+        max_leg = np.max(col_sums)
+        split_ratio = min_mid / float(max_leg + 1e-5)
+        if split_ratio < 0.45:
+            return "lower_body"
+
+    return "upper_body"
+
 
 def isolate_garment_alpha(garment_pil: Image.Image, category: str = "upper_body") -> Image.Image:
     """
-    Strips away non-clothing elements:
-    - Removes other model's head/face/neck above collar line.
-    - Removes trousers/legs below hemline.
-    - Removes trees, bricks, walls, and background outside torso.
-    - Seamlessly inpaints mirror-selfie smartphones & hands with fabric texture.
+    Isolates garment silhouette with clean transparent background:
+    - Removes solid white/grey backdrops, studio cardboard margins, and borders.
+    - Preserves garment contour without boxy bounding artifacts.
+    - For upper body with a model, clips out other model's head/face above collar.
+    - Inpaints mirror-selfie phones/hands with matching fabric.
     Returns: Tightly cropped transparent RGBA PIL Image.
     """
-    img_rgb = np.array(garment_pil.convert("RGB"))
-    h, w = img_rgb.shape[:2]
+    raw_rgba = garment_pil.convert("RGBA")
+    raw_arr = np.array(raw_rgba)
+    h, w = raw_arr.shape[:2]
+    img_rgb = raw_arr[:, :, :3]
+    orig_alpha = raw_arr[:, :, 3]
 
-    # Detect model coordinates
-    face = pose_tracker._detect_face_fallback(img_rgb)
-    fx, fy, fw, fh = face
+    # 1. If image already has a good transparent alpha channel, use it directly
+    has_alpha = np.count_nonzero(orig_alpha < 240) > (h * w * 0.05)
+    if has_alpha:
+        mask = orig_alpha.copy()
+    else:
+        # 2. Flood-fill background from perimeter seeds
+        bg_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
+        copy_rgb = img_rgb.copy()
+        seeds = [
+            (0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1),
+            (w // 2, 0), (w // 2, h - 1), (0, h // 2), (w - 1, h // 2),
+            (max(0, int(w * 0.08)), 0), (min(w - 1, int(w * 0.92)), 0),
+            (0, max(0, int(h * 0.08))), (w - 1, max(0, int(h * 0.08)))
+        ]
+        for sx, sy in seeds:
+            if bg_mask[sy + 1, sx + 1] == 0:
+                b_color = copy_rgb[sy, sx].astype(float)
+                # Flood if neutral/light background or uniform color
+                if b_color.mean() > 175 or (abs(b_color[0] - b_color[1]) < 25 and abs(b_color[1] - b_color[2]) < 25):
+                    if cv2 is not None and hasattr(cv2, 'floodFill'):
+                        cv2.floodFill(copy_rgb, bg_mask, (sx, sy), 0, (26, 26, 26), (26, 26, 26), cv2.FLOODFILL_FIXED_RANGE)
 
-    collar_y = max(0, int(fy + fh * 1.05))
-    waist_y = min(h, int(fy + fh * 3.4))
-    x0 = max(0, int(fx - fw * 1.05))
-    x1 = min(w, int(fx + fw * 2.05))
+        fg_candidates = (bg_mask[1:-1, 1:-1] == 0).astype(np.uint8)
 
-    # Detect skin and phone held in lower torso
+        # 3. Connected Components Analysis: keep the central garment cluster,
+        # completely filtering out stray vertical border slabs or cardboard edges
+        if cv2 is not None and hasattr(cv2, 'connectedComponentsWithStats'):
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(fg_candidates)
+            if num_labels > 1:
+                best_label = 1
+                best_score = -1.0
+                for i in range(1, num_labels):
+                    area = stats[i, cv2.CC_STAT_AREA]
+                    cx, cy = centroids[i]
+                    center_dist = abs(cx - w / 2.0) / (w / 2.0)
+                    score = area * max(0.1, (1.0 - 0.6 * center_dist))
+                    if score > best_score:
+                        best_score = score
+                        best_label = i
+                mask = (labels == best_label).astype(np.uint8) * 255
+            else:
+                mask = fg_candidates * 255
+        else:
+            mask = fg_candidates * 255
+
+    # 4. If upper body with visible human face/head, clip above collar
+    if category != "lower_body":
+        face = pose_tracker._detect_face_fallback(img_rgb)
+        fx, fy, fw, fh = face
+        if fy < h * 0.35 and fw > 30 and fh > 30:
+            collar_y = max(0, int(fy + fh * 1.05))
+            mask[:collar_y, :] = 0
+
+    # 5. Inpaint mirror-selfie phones and hands in lower torso if present
     r = img_rgb[:, :, 0].astype(float)
     g = img_rgb[:, :, 1].astype(float)
     b = img_rgb[:, :, 2].astype(float)
     lum = 0.299 * r + 0.587 * g + 0.114 * b
-    is_skin = (lum > 105) & (lum < 245) & (r > 115) & (g > 70) & (b > 50) & (r > g) & (g > b) & ((r - g) > 18) & ((r - g) < 95)
-
-    torso_skin = is_skin.copy()
-    torso_skin[:int(collar_y + fh * 0.3), :] = False
-    torso_skin[waist_y:, :] = False
-
-    phone_and_hands = np.zeros((h, w), dtype=np.uint8)
-    if np.count_nonzero(torso_skin) > 20 and cv2 is not None and hasattr(cv2, 'dilate'):
-        kernel = np.ones((28, 28), np.uint8)
-        dilated_hand = cv2.dilate(torso_skin.astype(np.uint8), kernel) > 0
-        is_phone = dilated_hand & (lum < 60)
-        phone_and_hands = (torso_skin | is_phone).astype(np.uint8) * 255
-
+    is_skin = (lum > 110) & (lum < 240) & (r > 120) & (g > 70) & (b > 50) & (r > g) & (g > b) & ((r - g) > 20)
     inpainted_rgb = img_rgb.copy()
-    if cv2 is not None and hasattr(cv2, 'inpaint') and np.count_nonzero(phone_and_hands) > 0:
-        try:
-            inpainted_rgb = cv2.inpaint(img_rgb, phone_and_hands, 7, cv2.INPAINT_TELEA)
-        except Exception:
-            pass
 
-    # Sample border background colors
-    left_border = img_rgb[:, :max(5, int(w * 0.10))].reshape(-1, 3)
-    right_border = img_rgb[:, min(w - 5, int(w * 0.90)):].reshape(-1, 3)
-    top_border = img_rgb[:max(5, int(h * 0.08)), :].reshape(-1, 3)
-    bg_colors = [np.median(left_border, axis=0), np.median(right_border, axis=0), np.median(top_border, axis=0)]
+    if cv2 is not None and hasattr(cv2, 'inpaint'):
+        skin_in_garment = (mask > 100) & is_skin
+        if np.count_nonzero(skin_in_garment) > 50:
+            kernel = np.ones((9, 9), np.uint8)
+            dilated_skin = cv2.dilate(skin_in_garment.astype(np.uint8), kernel) * 255
+            try:
+                inpainted_rgb = cv2.inpaint(img_rgb, dilated_skin, 5, cv2.INPAINT_TELEA)
+            except Exception:
+                pass
 
-    mask = np.zeros((h, w), dtype=np.uint8)
-    grabcut_success = False
+    # 6. Smooth feathering on alpha mask
+    if cv2 is not None and hasattr(cv2, 'GaussianBlur'):
+        mask = cv2.GaussianBlur(mask, (5, 5), 0)
+    else:
+        mask = np.array(Image.fromarray(mask).filter(ImageFilter.GaussianBlur(2)))
 
-    if cv2 is not None and hasattr(cv2, 'grabCut'):
-        try:
-            gc_mask = np.full((h, w), cv2.GC_PR_BGD, dtype=np.uint8)
-            gc_mask[:, :x0] = cv2.GC_BGD
-            gc_mask[:, x1:] = cv2.GC_BGD
-            gc_mask[:collar_y, :] = cv2.GC_BGD
-            gc_mask[waist_y:, :] = cv2.GC_BGD
-
-            for bg_c in bg_colors:
-                dist = np.linalg.norm(inpainted_rgb.astype(float) - bg_c, axis=-1)
-                gc_mask[dist < 32] = cv2.GC_BGD
-
-            cx0, cx1 = int(x0 + (x1 - x0) * 0.25), int(x0 + (x1 - x0) * 0.75)
-            cy0, cy1 = int(collar_y + (waist_y - collar_y) * 0.20), int(collar_y + (waist_y - collar_y) * 0.75)
-            gc_mask[cy0:cy1, cx0:cx1] = cv2.GC_FGD
-            gc_mask[is_skin] = cv2.GC_BGD
-
-            bgd_model = np.zeros((1, 65), np.float64)
-            fgd_model = np.zeros((1, 65), np.float64)
-            cv2.grabCut(cv2.cvtColor(inpainted_rgb, cv2.COLOR_RGB2BGR), gc_mask, None, bgd_model, fgd_model, 4, cv2.GC_INIT_WITH_MASK)
-            mask = np.where((gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 255, 0).astype('uint8')
-            grabcut_success = True
-        except Exception:
-            grabcut_success = False
-
-    if not grabcut_success or np.count_nonzero(mask) < 300:
-        torso_crop = inpainted_rgb[collar_y:waist_y, x0:x1].astype(float)
-        dist_bg = np.min([np.linalg.norm(torso_crop - bg_c, axis=-1) for bg_c in bg_colors], axis=0)
-        fg_crop = np.where(dist_bg > 35, 255, 0).astype(np.uint8)
-        mask = np.zeros((h, w), dtype=np.uint8)
-        mask[collar_y:waist_y, x0:x1] = fg_crop
-
-    # Hard boundary clipping: guarantees zero background clutter
-    mask[:collar_y, :] = 0
-    mask[waist_y:, :] = 0
-    mask[:, :x0] = 0
-    mask[:, x1:] = 0
-    mask[is_skin] = 0
-
-    # Alpha edge feathering
-    try:
-        if cv2 is not None and hasattr(cv2, 'GaussianBlur'):
-            mask = cv2.GaussianBlur(mask, (5, 5), 0)
-        else:
-            mask = np.array(Image.fromarray(mask).filter(ImageFilter.GaussianBlur(2)))
-    except Exception:
-        pass
-
-    # Tight crop
+    # 7. Tight crop around isolated garment
     coords = np.argwhere(mask > 30)
     if len(coords) > 0:
         cy0, cx0 = coords.min(axis=0)
@@ -364,8 +415,8 @@ def isolate_garment_alpha(garment_pil: Image.Image, category: str = "upper_body"
         crop_rgb = inpainted_rgb[cy0:cy1, cx0:cx1]
         crop_alpha = mask[cy0:cy1, cx0:cx1]
     else:
-        crop_rgb = inpainted_rgb[collar_y:waist_y, x0:x1]
-        crop_alpha = mask[collar_y:waist_y, x0:x1]
+        crop_rgb = inpainted_rgb
+        crop_alpha = mask
 
     rgba = np.dstack([crop_rgb, crop_alpha])
     return Image.fromarray(rgba, "RGBA")
@@ -402,9 +453,11 @@ def warp_and_blend_garment(
     user_frame: np.ndarray,
     garment_rgba: np.ndarray,
     landmarks: Dict[str, Any],
+    category: str = "upper_body",
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
     """
     Performs landmark-anchored perspective warping, face/wrist exclusion, and ambient lighting blending.
+    Supports both 'upper_body' (jackets, shirts) and 'lower_body' (pants, trousers).
     Returns: (synthesized_frame, warped_garment_rgba, position_info)
     """
     h, w = user_frame.shape[:2]
@@ -418,14 +471,7 @@ def warp_and_blend_garment(
     l_wrist = landmarks.get("l_wrist", np.array([-100.0, -100.0]))
     r_wrist = landmarks.get("r_wrist", np.array([-100.0, -100.0]))
 
-    # Shoulder span vector and angle
-    sh_vec = r_sh - l_sh
-    sh_span = max(40.0, float(np.linalg.norm(sh_vec)))
-    u_sh = sh_vec / sh_span
-    # Downward normal vector
-    u_down = np.array([-u_sh[1], u_sh[0]], dtype=np.float32)
-
-    # Calculate garment source anchors (shoulders and hemline)
+    # Calculate garment active alpha boundaries
     alpha = garment_rgba[:, :, 3]
     coords = np.argwhere(alpha > 30)
     if len(coords) > 0:
@@ -437,28 +483,70 @@ def warp_and_blend_garment(
     g_act_w = max(10, gx1 - gx0)
     g_act_h = max(10, gy1 - gy0)
 
-    src_4pts = np.array([
-        [gx0 + g_act_w * 0.12, gy0 + g_act_h * 0.08],  # Left shoulder
-        [gx1 - g_act_w * 0.12, gy0 + g_act_h * 0.08],  # Right shoulder
-        [gx1 - g_act_w * 0.15, gy1 - g_act_h * 0.04],  # Right hem
-        [gx0 + g_act_w * 0.15, gy1 - g_act_h * 0.04],  # Left hem
-    ], dtype=np.float32)
+    # Shoulder span vector and angle
+    sh_vec = r_sh - l_sh
+    sh_span = max(40.0, float(np.linalg.norm(sh_vec)))
+    u_sh = sh_vec / sh_span
+    u_down = np.array([-u_sh[1], u_sh[0]], dtype=np.float32)
 
-    # Destination anchors mapped to user skeletal pose
-    sleeve_margin = sh_span * 0.18
-    dst_l_sh = l_sh - u_sh * sleeve_margin - u_down * (sh_span * 0.07)
-    dst_r_sh = r_sh + u_sh * sleeve_margin - u_down * (sh_span * 0.07)
+    if category == "lower_body":
+        # -------------------------------------------------------------
+        # LOWER BODY WARPING (PANTS / TROUSERS / JEANS)
+        # -------------------------------------------------------------
+        hip_vec = r_hip - l_hip
+        hip_span = float(np.linalg.norm(hip_vec))
+        if hip_span < 30.0:
+            hip_span = sh_span * 0.75
+            center_x = nose[0]
+            l_hip = np.array([center_x - hip_span * 0.5, l_sh[1] + sh_span * 1.35], dtype=np.float32)
+            r_hip = np.array([center_x + hip_span * 0.5, r_sh[1] + sh_span * 1.35], dtype=np.float32)
+            hip_vec = r_hip - l_hip
 
-    # Hem anchors (waist/hips)
-    if l_hip[1] > l_sh[1] and r_hip[1] > r_sh[1]:
-        dst_r_hem = r_hip + u_sh * (sh_span * 0.12) + u_down * (sh_span * 0.12)
-        dst_l_hem = l_hip - u_sh * (sh_span * 0.12) + u_down * (sh_span * 0.12)
+        u_hip = hip_vec / max(1.0, float(np.linalg.norm(hip_vec)))
+        u_down_hip = np.array([-u_hip[1], u_hip[0]], dtype=np.float32)
+
+        src_4pts = np.array([
+            [gx0 + g_act_w * 0.08, gy0 + g_act_h * 0.04],  # Top left waist
+            [gx1 - g_act_w * 0.08, gy0 + g_act_h * 0.04],  # Top right waist
+            [gx1 - g_act_w * 0.08, gy1 - g_act_h * 0.03],  # Bottom right hem
+            [gx0 + g_act_w * 0.08, gy1 - g_act_h * 0.03],  # Bottom left hem
+        ], dtype=np.float32)
+
+        waist_margin = hip_span * 0.16
+        dst_l_waist = l_hip - u_hip * waist_margin - u_down_hip * (hip_span * 0.06)
+        dst_r_waist = r_hip + u_hip * waist_margin - u_down_hip * (hip_span * 0.06)
+
+        # Bottom hem points (downwards towards ankles or frame bottom)
+        pant_len = hip_span * 2.8
+        dst_r_hem = dst_r_waist + u_down_hip * pant_len
+        dst_l_hem = dst_l_waist + u_down_hip * pant_len
+
+        dst_4pts = np.array([dst_l_waist, dst_r_waist, dst_r_hem, dst_l_hem], dtype=np.float32)
+
     else:
-        torso_est = sh_span * 1.35
-        dst_r_hem = dst_r_sh + u_down * torso_est - u_sh * (sh_span * 0.06)
-        dst_l_hem = dst_l_sh + u_down * torso_est + u_sh * (sh_span * 0.06)
+        # -------------------------------------------------------------
+        # UPPER BODY WARPING (JACKETS / SHIRTS / HOODIES)
+        # -------------------------------------------------------------
+        src_4pts = np.array([
+            [gx0 + g_act_w * 0.12, gy0 + g_act_h * 0.08],  # Left shoulder
+            [gx1 - g_act_w * 0.12, gy0 + g_act_h * 0.08],  # Right shoulder
+            [gx1 - g_act_w * 0.15, gy1 - g_act_h * 0.04],  # Right hem
+            [gx0 + g_act_w * 0.15, gy1 - g_act_h * 0.04],  # Left hem
+        ], dtype=np.float32)
 
-    dst_4pts = np.array([dst_l_sh, dst_r_sh, dst_r_hem, dst_l_hem], dtype=np.float32)
+        sleeve_margin = sh_span * 0.18
+        dst_l_sh = l_sh - u_sh * sleeve_margin - u_down * (sh_span * 0.07)
+        dst_r_sh = r_sh + u_sh * sleeve_margin - u_down * (sh_span * 0.07)
+
+        if l_hip[1] > l_sh[1] and r_hip[1] > r_sh[1]:
+            dst_r_hem = r_hip + u_sh * (sh_span * 0.12) + u_down * (sh_span * 0.12)
+            dst_l_hem = l_hip - u_sh * (sh_span * 0.12) + u_down * (sh_span * 0.12)
+        else:
+            torso_est = sh_span * 1.35
+            dst_r_hem = dst_r_sh + u_down * torso_est - u_sh * (sh_span * 0.06)
+            dst_l_hem = dst_l_sh + u_down * torso_est + u_sh * (sh_span * 0.06)
+
+        dst_4pts = np.array([dst_l_sh, dst_r_sh, dst_r_hem, dst_l_hem], dtype=np.float32)
 
     # Perspective Warping
     if cv2 is not None and hasattr(cv2, 'getPerspectiveTransform'):
@@ -467,7 +555,6 @@ def warp_and_blend_garment(
             garment_rgba, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0)
         )
     else:
-        # Affine 3-point fallback
         M = cv2.getAffineTransform(src_4pts[:3], dst_4pts[:3])
         warped_garment = cv2.warpAffine(
             garment_rgba, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0)
@@ -477,46 +564,57 @@ def warp_and_blend_garment(
     warped_alpha = warped_garment[:, :, 3].copy()
 
     # -------------------------------------------------------------
-    # Multi-point Exclusion Masks (Face, Neck, Chin, Wrists, Hands)
+    # Multi-point Exclusion Masks
     # -------------------------------------------------------------
-    neck_pt = (l_sh + r_sh) / 2.0
-    chin_pt = nose + (neck_pt - nose) * 0.70
+    if category == "lower_body":
+        # Keep entire torso, chest, neck, and face 100% visible
+        waist_cut_y = int(min(dst_l_waist[1], dst_r_waist[1]) - hip_span * 0.05)
+        if waist_cut_y > 0:
+            warped_alpha[:waist_cut_y, :] = 0
+            if waist_cut_y < h:
+                blend_band = min(18, h - waist_cut_y)
+                for by in range(blend_band):
+                    factor = by / float(blend_band)
+                    warped_alpha[waist_cut_y + by, :] = (warped_alpha[waist_cut_y + by, :].astype(float) * factor).astype(np.uint8)
 
-    if cv2 is not None:
-        # 1. Face & Chin Exclusion (guarantees head and chin never get covered)
-        head_radius_x = int(sh_span * 0.28)
-        head_radius_y = int(sh_span * 0.38)
-        cv2.ellipse(
-            warped_alpha,
-            (int(nose[0]), int(nose[1])),
-            (head_radius_x, head_radius_y),
-            0, 0, 360, 0, -1
-        )
+    else:
+        # Upper body exclusions: face, neck notch, wrists
+        neck_pt = (l_sh + r_sh) / 2.0
+        chin_pt = nose + (neck_pt - nose) * 0.70
 
-        # 2. Neck Notch Protection
-        neck_poly = np.array([
-            [int(chin_pt[0] - sh_span * 0.16), int(chin_pt[1])],
-            [int(chin_pt[0] + sh_span * 0.16), int(chin_pt[1])],
-            [int(neck_pt[0] + sh_span * 0.10), int(neck_pt[1] - sh_span * 0.05)],
-            [int(neck_pt[0] - sh_span * 0.10), int(neck_pt[1] - sh_span * 0.05)],
-        ], dtype=np.int32)
-        cv2.fillPoly(warped_alpha, [neck_poly], 0)
+        if cv2 is not None:
+            # 1. Face & Chin Exclusion
+            head_radius_x = int(sh_span * 0.28)
+            head_radius_y = int(sh_span * 0.38)
+            cv2.ellipse(
+                warped_alpha,
+                (int(nose[0]), int(nose[1])),
+                (head_radius_x, head_radius_y),
+                0, 0, 360, 0, -1
+            )
 
-        # 3. Wrists & Hands Exclusion (hands stay in front when gesturing)
-        for wrist in [l_wrist, r_wrist]:
-            if wrist[0] > 0 and wrist[1] > 0:
-                wx, wy = int(wrist[0]), int(wrist[1])
-                # If wrist overlaps the torso area
-                if 0 <= wx < w and 0 <= wy < h:
-                    hand_radius = int(sh_span * 0.20)
-                    hand_mask = np.zeros((h, w), dtype=np.uint8)
-                    cv2.circle(hand_mask, (wx, wy), hand_radius, 255, -1)
-                    # Check for skin tones within hand circle
-                    r_u = user_frame[:, :, 0].astype(float)
-                    g_u = user_frame[:, :, 1].astype(float)
-                    b_u = user_frame[:, :, 2].astype(float)
-                    is_skin = (r_u > g_u) & (g_u > b_u) & (r_u > 90) & ((r_u - g_u) > 15)
-                    warped_alpha[(hand_mask > 0) & is_skin] = 0
+            # 2. Neck Notch Protection
+            neck_poly = np.array([
+                [int(chin_pt[0] - sh_span * 0.16), int(chin_pt[1])],
+                [int(chin_pt[0] + sh_span * 0.16), int(chin_pt[1])],
+                [int(neck_pt[0] + sh_span * 0.10), int(neck_pt[1] - sh_span * 0.05)],
+                [int(neck_pt[0] - sh_span * 0.10), int(neck_pt[1] - sh_span * 0.05)],
+            ], dtype=np.int32)
+            cv2.fillPoly(warped_alpha, [neck_poly], 0)
+
+            # 3. Wrists & Hands Exclusion
+            for wrist in [l_wrist, r_wrist]:
+                if wrist[0] > 0 and wrist[1] > 0:
+                    wx, wy = int(wrist[0]), int(wrist[1])
+                    if 0 <= wx < w and 0 <= wy < h:
+                        hand_radius = int(sh_span * 0.20)
+                        hand_mask = np.zeros((h, w), dtype=np.uint8)
+                        cv2.circle(hand_mask, (wx, wy), hand_radius, 255, -1)
+                        r_u = user_frame[:, :, 0].astype(float)
+                        g_u = user_frame[:, :, 1].astype(float)
+                        b_u = user_frame[:, :, 2].astype(float)
+                        is_skin = (r_u > g_u) & (g_u > b_u) & (r_u > 90) & ((r_u - g_u) > 15)
+                        warped_alpha[(hand_mask > 0) & is_skin] = 0
 
     # -------------------------------------------------------------
     # Ambient Lighting Matching
@@ -553,30 +651,34 @@ def warp_and_blend_garment(
             "rel_y": float(box_y0 / h),
             "rel_w": float((box_x1 - box_x0) / w),
             "rel_h": float((box_y1 - box_y0) / h),
+            "category": category,
         }
     else:
-        pos_info = {"x": 0, "y": 0, "width": w, "height": h, "rel_x": 0.2, "rel_y": 0.3, "rel_w": 0.6, "rel_h": 0.5}
+        default_rel_y = 0.55 if category == "lower_body" else 0.30
+        pos_info = {"x": 0, "y": 0, "width": w, "height": h, "rel_x": 0.2, "rel_y": default_rel_y, "rel_w": 0.6, "rel_h": 0.5, "category": category}
 
-    return synthesized, warped_garment, pos_info
+    warped_rgba_out = np.dstack([adjusted_rgb, smooth_alpha])
+    return synthesized, warped_rgba_out, pos_info
 
 
 # =====================================================================
-# 4. REST Endpoints & Service Compatibility
+# 4. REST Endpoints & Decart Queue Compatibility
 # =====================================================================
 
 class TryOnPayload(BaseModel):
     user_image: str = Field(..., description="Base64 data URI of the user photo / webcam frame")
     garment_url: str = Field(..., description="URL or base64 data URI of the clothing item")
-    category: str = Field("upper_body", description="Garment category: 'upper_body', 'lower_body', or 'dress'")
+    category: str = Field("auto", description="Garment category: 'upper_body', 'lower_body', or 'auto'")
 
 
 @app.get("/")
 def index():
     return {
         "service": "Live Dressing AI Engine",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "features": [
-            "MediaPipe Skeletal Warping",
+            "MediaPipe Skeletal Warping (Upper & Lower Body)",
+            "Automatic Garment Category Classification",
             "Multi-point Exclusion Masks",
             "Ambient Lighting Matching",
             "WebSocket Real-time Streaming (/ws/tryon)",
@@ -594,9 +696,7 @@ def health_check():
     }
 
 
-@app.api_route("/api/tokens", methods=["GET", "POST"])
-async def get_tokens(request: Request):
-    now = time.time()
+def _create_session_token(now: float) -> dict:
     return {
         "apiKey": f"ld_live_session_{int(now)}",
         "expiresAt": datetime.fromtimestamp(now + 86400 * 7, tz=timezone.utc).isoformat(),
@@ -609,20 +709,51 @@ async def get_tokens(request: Request):
     }
 
 
+@app.api_route("/api/tokens", methods=["GET", "POST"])
+async def get_tokens(request: Request):
+    now = time.time()
+    return _create_session_token(now)
+
+
 @app.api_route("/api/queue/join", methods=["GET", "POST"])
 async def queue_join(request: Request):
+    """
+    Decart Queue Join Endpoint:
+    Returns 'active' status with an embedded 'token' object containing 'apiKey'
+    so Decart's widget.bundle.js admits the session immediately without throwing
+    'unexpected join response' or falling back.
+    """
     now = time.time()
+    token = _create_session_token(now)
     return {
         "status": "active",
         "ticket_id": f"ld_ticket_{int(now)}",
         "position": 0,
         "poll_ms": 1000,
+        "token": token,
     }
 
 
 @app.api_route("/api/queue/status", methods=["GET", "POST"])
 def queue_status():
-    return {"status": "active", "position": 0}
+    now = time.time()
+    token = _create_session_token(now)
+    return {
+        "status": "active",
+        "position": 0,
+        "token": token,
+    }
+
+
+@app.api_route("/api/queue/requeue", methods=["GET", "POST"])
+def queue_requeue():
+    now = time.time()
+    token = _create_session_token(now)
+    return {
+        "status": "active",
+        "ticket_id": f"ld_ticket_{int(now)}",
+        "token": token,
+    }
 
 
 @app.api_route("/api/queue/heartbeat", methods=["GET", "POST"])
@@ -683,10 +814,11 @@ async def api_try_on(payload: TryOnPayload):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to decode user frame: {str(e)}")
 
-    # 2. Fetch & Segment Garment
+    # 2. Fetch, Classify & Segment Garment
     try:
         garment_pil = fetch_garment_image(payload.garment_url)
-        clean_garment = isolate_garment_alpha(garment_pil, category=payload.category)
+        cat = detect_garment_category(garment_pil, category_hint=payload.category)
+        clean_garment = isolate_garment_alpha(garment_pil, category=cat)
         garment_rgba = np.array(clean_garment)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to isolate garment: {str(e)}")
@@ -695,13 +827,17 @@ async def api_try_on(payload: TryOnPayload):
     landmarks, is_detected = pose_tracker.extract_landmarks(user_frame)
 
     # 4. Skeletal Warping, Exclusion Masking & Ambient Blending
-    synthesized, warped_rgba, pos_info = warp_and_blend_garment(user_frame, garment_rgba, landmarks)
+    synthesized, warped_rgba, pos_info = warp_and_blend_garment(user_frame, garment_rgba, landmarks, category=cat)
 
     # 5. Base64 Encoding
     synth_pil = Image.fromarray(synthesized)
     buffered = io.BytesIO()
     synth_pil.save(buffered, format="JPEG", quality=92)
     b64_output = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    w_buffered = io.BytesIO()
+    Image.fromarray(warped_rgba).save(w_buffered, format="PNG")
+    b64_warped = base64.b64encode(w_buffered.getvalue()).decode("utf-8")
 
     g_buffered = io.BytesIO()
     clean_garment.save(g_buffered, format="PNG")
@@ -712,7 +848,9 @@ async def api_try_on(payload: TryOnPayload):
     return {
         "status": "success",
         "image": f"data:image/jpeg;base64,{b64_output}",
+        "warped_png": f"data:image/png;base64,{b64_warped}",
         "garment_png": f"data:image/png;base64,{b64_garment}",
+        "category": cat,
         "position": pos_info,
         "landmarks_detected": is_detected,
         "processing_time_ms": elapsed_ms,
@@ -733,6 +871,7 @@ async def websocket_tryon(websocket: WebSocket):
     """
     await websocket.accept()
     session_garment_rgba: Optional[np.ndarray] = None
+    session_category: str = "upper_body"
     cached_garment_url: Optional[str] = None
     print("[WebSocket] Client connected to /ws/tryon")
 
@@ -747,17 +886,20 @@ async def websocket_tryon(websocket: WebSocket):
 
             # Garment Registration / Update
             req_garment_url = data.get("garment_url")
+            req_category = data.get("category", "auto")
             if req_garment_url and req_garment_url != cached_garment_url:
                 try:
                     g_pil = fetch_garment_image(req_garment_url)
-                    isolated = isolate_garment_alpha(g_pil)
+                    session_category = detect_garment_category(g_pil, category_hint=req_category)
+                    isolated = isolate_garment_alpha(g_pil, category=session_category)
                     session_garment_rgba = np.array(isolated)
                     cached_garment_url = req_garment_url
-                    print(f"[WebSocket] Garment isolated and cached ({session_garment_rgba.shape[1]}x{session_garment_rgba.shape[0]})")
+                    print(f"[WebSocket] Garment isolated and cached ({session_garment_rgba.shape[1]}x{session_garment_rgba.shape[0]}, category={session_category})")
                     if msg_type == "set_garment":
                         await websocket.send_json({
                             "type": "garment_ready",
                             "status": "success",
+                            "category": session_category,
                             "width": session_garment_rgba.shape[1],
                             "height": session_garment_rgba.shape[0],
                         })
@@ -795,7 +937,9 @@ async def websocket_tryon(websocket: WebSocket):
 
             # Extract pose landmarks and warp
             landmarks, is_detected = pose_tracker.extract_landmarks(user_frame)
-            synthesized, _, pos_info = warp_and_blend_garment(user_frame, session_garment_rgba, landmarks)
+            synthesized, warped_rgba, pos_info = warp_and_blend_garment(
+                user_frame, session_garment_rgba, landmarks, category=session_category
+            )
 
             # Encode output JPEG
             out_pil = Image.fromarray(synthesized)
@@ -803,12 +947,18 @@ async def websocket_tryon(websocket: WebSocket):
             out_pil.save(buf, format="JPEG", quality=88)
             out_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
+            w_buf = io.BytesIO()
+            Image.fromarray(warped_rgba).save(w_buf, format="PNG")
+            w_b64 = base64.b64encode(w_buf.getvalue()).decode("utf-8")
+
             elapsed_ms = round((time.time() - start_t) * 1000)
 
             await websocket.send_json({
                 "type": "frame_result",
                 "status": "success",
                 "image": f"data:image/jpeg;base64,{out_b64}",
+                "warped_png": f"data:image/png;base64,{w_b64}",
+                "category": session_category,
                 "landmarks_detected": is_detected,
                 "position": pos_info,
                 "processing_time_ms": elapsed_ms,

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Dressing</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 280px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background: #110e1a;
+      color: #f3f0f9;
+      -webkit-font-smoothing: antialiased;
+      padding: 16px;
+      user-select: none;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .brand-icon {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+    }
+
+    .brand-name {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      background: linear-gradient(135deg, #ffd778 0%, #ffffff 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #888;
+    }
+
+    .status-dot.online {
+      background: #10b981;
+      box-shadow: 0 0 8px #10b981;
+    }
+
+    .status-dot.offline {
+      background: #ef4444;
+      box-shadow: 0 0 8px #ef4444;
+    }
+
+    .action-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      padding: 11px 14px;
+      background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 8px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      transition: all 0.2s ease;
+      margin-bottom: 10px;
+    }
+
+    .action-btn:hover {
+      background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+      transform: translateY(-1px);
+    }
+
+    .config-box {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 10px;
+      margin-top: 10px;
+    }
+
+    .config-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #a79fc0;
+      margin-bottom: 6px;
+      display: block;
+    }
+
+    .config-input {
+      width: 100%;
+      background: #0d0a15;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 6px;
+      color: #e5e0f5;
+      font-size: 11px;
+      padding: 6px 8px;
+      outline: none;
+      font-family: monospace;
+      margin-bottom: 6px;
+    }
+
+    .config-input:focus {
+      border-color: #8b5cf6;
+    }
+
+    .save-btn {
+      width: 100%;
+      background: #231b36;
+      border: 1px solid rgba(139, 92, 246, 0.3);
+      color: #d1c4f5;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 5px;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+
+    .save-btn:hover {
+      background: #31254d;
+      color: #fff;
+    }
+
+    .footer {
+      margin-top: 12px;
+      font-size: 10px;
+      color: #797194;
+      text-align: center;
+    }
+
+    .footer a {
+      color: #a78bfa;
+      text-decoration: none;
+    }
+    .footer a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <img src="icons/icon32.png" alt="Logo" class="brand-icon">
+      <span class="brand-name">Live Dressing</span>
+    </div>
+    <div class="status-badge">
+      <span id="status-dot" class="status-dot"></span>
+      <span id="status-text">Checking...</span>
+    </div>
+  </div>
+
+  <button class="action-btn" id="open-widget">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+      <circle cx="12" cy="13" r="4"/>
+    </svg>
+    Open Fitting Room
+  </button>
+
+  <div class="config-box">
+    <label class="config-label" for="backend-url">Backend Server Endpoint</label>
+    <input type="text" id="backend-url" class="config-input" placeholder="http://127.0.0.1:8000">
+    <button id="save-config" class="save-btn">Save & Recheck</button>
+  </div>
+
+  <div class="footer">
+    <span>Self-Hosted Virtual Try-On</span> · 
+    <a href="http://127.0.0.1:8000/docs" target="_blank" id="docs-link">API Docs</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

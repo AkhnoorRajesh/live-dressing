@@ -1,0 +1,10 @@
+{
+  "pythonVersion": "3.13",
+  "pythonPlatform": "Windows",
+  "pythonPath": "C:\\Users\\NAWAB\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+  "extraPaths": [
+    "C:\\Users\\NAWAB\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages",
+    "backend"
+  ],
+  "reportMissingImports": "none"
+}

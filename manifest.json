@@ -1,0 +1,73 @@
+{
+  "manifest_version": 3,
+  "name": "Live Dressing - AI Virtual Try-On",
+  "version": "1.0.0",
+  "description": "Virtually try on clothes on any fashion website using your own AI fitting room.",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Live Dressing: AI Virtual Fitting Room",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "crash_reports.js",
+        "button-detector.js",
+        "config.js",
+        "revolve.js",
+        "ugg.js",
+        "guess.js",
+        "factory54.js",
+        "uniqlo.js",
+        "loropiana.js",
+        "per_website_garment_filter.js",
+        "widget-core.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "widget.html",
+        "widget-prefetch.js",
+        "widget.bundle.js",
+        "icons/icon16.png",
+        "icons/icon32.png",
+        "icons/icon48.png",
+        "icons/icon128.png",
+        "widget-init.js",
+        "stream-quality.js",
+        "connection-indicator.js",
+        "logger.js",
+        "moderation-overlay.js",
+        "moderation-reset-attempt.js",
+        "recording.js",
+        "billing.js",
+        "config.js",
+        "shirt1.svg",
+        "shirt2.svg",
+        "shirt3.svg"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "permissions": ["activeTab", "storage"],
+  "host_permissions": ["<all_urls>"]
+}

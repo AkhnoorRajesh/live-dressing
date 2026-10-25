@@ -1,0 +1,2392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Virtual Try-On</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  /*
+   * ── Border-beam design tokens ─────────────────────────────────────────────
+   * Change these once to update every beam-animated button in the widget.
+   * --beam-peak    : the bright centre of the travelling arc
+   * --beam-fade    : the soft glow on either side of the peak
+   * --beam-duration: one full orbit
+   * --beam-width   : the visible border thickness the mask reveals
+   */
+  :root {
+    --beam-peak:     rgba(220, 220, 220, 0.90);
+    --beam-fade:     rgba(180, 180, 180, 0.40);
+    --beam-duration: 2.5s;
+    --beam-width:    1.5px;
+  }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #fff;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+
+  /*
+   * #root is a positioning context for all overlaid children.
+   * Videos, header, footer, and buttons all sit in absolute layers on top
+   * of each other — the video expands to fill 100% of the available space.
+   */
+  #root {
+    position: relative;
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    background: #fff;
+  }
+
+  /* ── Shared small-label style ──────────────────────────────────────────────
+   * Used for eyebrows, sub-headlines, and limit notices throughout the widget.
+   * Individual selectors add only spacing / alignment on top of this base.
+   * ---------------------------------------------------------------------- */
+  .ui-label {
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.20em;
+    text-transform: uppercase;
+    color: rgba(0, 0, 0, 0.50);
+  }
+
+  /* ── Header — glass overlay at the top (fullscreen mode only) ── */
+  #header {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    z-index: 10000; /* above auto-start overlay (9999) so mobile header stays visible during loading */
+    height: 54px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 16px;
+    background: rgba(255, 255, 255, 0.71);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(0, 0, 0, 0.07);
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    color: rgba(0, 0, 0, 0.8);
+  }
+  /* Hide the bundle's own header text — we render our own title */
+  #header-title  { display: none !important; }
+  #status-badge  { display: none !important; }
+
+  /* ── Custom widget header title ── */
+  #widget-title {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+    pointer-events: none;
+    user-select: none;
+  }
+  #widget-title-sep {
+    display: flex;
+    align-items: center;
+    color: rgba(0,0,0,0.80);
+    flex-shrink: 0;
+  }
+  #widget-title-icon { display: none; }
+  #widget-title-text { display: none; }
+  /* The "Anywear" wordmark in the fullscreen header links to the site.
+     #widget-title is pointer-events:none (click-through to the video), so the
+     anchor has to opt back in explicitly or it is not clickable — same rule the
+     #footer controls follow. Inherits colour and drops the underline so the
+     header looks exactly as it did before it became a link. */
+  #anywear-title-link {
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
+    color: inherit;
+    pointer-events: auto;
+    transition: opacity 0.15s ease;
+  }
+  #anywear-title-link:hover { opacity: 0.62; }
+  #anywear-title-wordmark {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: rgba(0,0,0,0.82);
+    line-height: 1;
+    white-space: nowrap;
+  }
+  #widget-title-subtext {
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    text-transform: none;
+    color: rgba(0,0,0,0.55);
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  /* ── Anywear watermark — bottom-left of the video area ── */
+  #anywear-watermark {
+    position: absolute;
+    bottom: 14px;
+    left: 14px;
+    z-index: 20;
+    display: block;
+    line-height: 0;
+    opacity: 0.28;
+    /* The logo is forced pure white (brightness(0) invert(1)), so it disappears
+       against a bright camera background — a white wall, a window, a lit room.
+       A tight 0-offset pass lifts it off a white field by outlining the glyph
+       edges; the second, wider pass is a soft drop behind it.
+       Keep these LIGHT. drop-shadow filters compound — each pass runs over the
+       previous pass's output — so strengths multiply rather than add, and three
+       passes at high alpha read as a heavy black outline instead of a subtle
+       watermark. Two low-alpha passes are enough for contrast. */
+    filter: brightness(0) invert(1)
+            drop-shadow(0 0 2px rgba(0,0,0,0.42))
+            drop-shadow(0 1px 3px rgba(0,0,0,0.32));
+    transition: opacity 0.2s ease, transform 0.25s ease;
+    transform-origin: bottom left;
+    pointer-events: auto;
+  }
+  #root:hover #anywear-watermark { opacity: 0.72; }
+  #anywear-watermark:hover { opacity: 0.90; transform: scale(1.25); }
+  #anywear-watermark img { height: 22px; width: auto; display: block; }
+
+  /* ── Main area — fills the entire root ── */
+  #main-area {
+    position: absolute !important;
+    inset: 0 !important;        /* override any bundle top:54px header offset */
+    overflow: hidden;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  #main-area.ma-idle {
+    border: none;
+    background: #f7f6f5;
+  }
+
+  #main-area.ma-active {
+    border: none;
+    background: #000;
+  }
+  #main-area.ma-dragover {
+    border: 2px solid #a78bfa;
+    background: rgba(139,92,246,0.08);
+  }
+
+  /* ── Videos ── */
+  #local-video, #remote-video {
+    position: absolute !important;
+    inset: 0 !important;        /* override any bundle top:54px header offset */
+    width: 100% !important;
+    height: 100% !important;
+    transform: scaleX(-1);
+    display: none;
+  }
+  /* Local camera preview fills the frame edge-to-edge, sits behind connecting overlay (10). */
+  #local-video  { object-fit: cover; z-index: 9; }
+  /*
+   * Remote AI stream — layout is controlled entirely by the DECART_PANE_MODE
+   * and DECART_FULLSCREEN_MODE postMessage handlers in widget-init.js.
+   * Pane:       position:absolute, width:140%, left:-100px (center crop)
+   * Fullscreen: object-fit:contain (full landscape, no cropping)
+   * background:#000 fills the area before the stream arrives.
+   *
+   * Mobile path (≤768 px): widget-core.js never sends DECART_PANE_MODE on
+   * mobile (the widget is already fullscreen).  The PANE_MODE handler in the
+   * bundle would set remoteVideo.style.objectFit = "contain" as an inline
+   * style, but it never fires here.  We handle mobile explicitly below so
+   * each platform owns its own rule — no CSS-cascade side-effects.
+   */
+  #remote-video { background: #000; }
+
+  /* Mobile: the Decart model ALWAYS outputs landscape (1088 × 624).
+   *
+   * The person is UPRIGHT in the landscape frame — NOT sideways.
+   * Rotating the video makes them appear sideways (wrong).
+   *
+   * Correct approach: replicate the desktop PANE_MODE float-crop.
+   *   width:250% makes the element 2.5× the container width (975px on a 390px screen).
+   *   left:-75% shifts it left so the CENTRE strip of the element is visible.
+   *   overflow:hidden on #root clips to the container width (390px) → portrait view.
+   *   Shows the centre 390/975 = 40% of the landscape frame = the person, upright.
+   * This is exactly what widget-init.js PANE_MODE does on desktop.
+   *
+   * Matches the isMobile guard in _widget_entry.js.
+   *
+   * NOTE on (min-height: 700px):
+   *   The desktop float pane is ~473–709 px wide × 380–620 px tall, so
+   *   (max-width: 768px) alone would fire on desktop too.
+   *   Mobile fullscreen is ≥844 px tall.  Adding (min-height: 700px) reliably
+   *   excludes the desktop pane (≤620 px) and targets only mobile fullscreen.
+   *
+   * NOTE on object-fit: cover (not fill, not contain):
+   *   The model may return landscape 1088×624 (iPhone/Android) or portrait
+   *   624×1088 (Samsung — depends on what frames the model receives).
+   *   cover always fills the container without distortion; it crops the
+   *   shorter axis.  fill squashes (landscape→portrait stretch); contain
+   *   letterboxes.
+   *
+   * NOTE on Samsung / min-height miss:
+   *   Samsung Internet browser chrome can reduce the iframe viewport below
+   *   700px, causing this rule to miss.  A second JS layer in _widget_entry.js
+   *   (onRemoteStream callback, guarded by !isPaneMode) force-applies the same
+   *   styles via inline !important as a belt-and-suspenders fallback.
+   *   See docs/mobile.md § "AI video layout — remote video on mobile". */
+  @media (max-width: 768px) and (min-height: 700px) {
+    #remote-video {
+      position: absolute !important;
+      width: 100% !important;
+      height: 100% !important;
+      top: 0 !important;
+      left: 0 !important;
+      right: auto !important;
+      bottom: auto !important;
+      transform: scaleX(-1);
+      object-fit: cover;
+    }
+  }
+
+  /* ── Mobile UI size bumps ──────────────────────────────────────────────────── */
+  /*
+   * WHAT EACH ELEMENT IS (visual inventory):
+   *
+   *  #widget-title-text        — "VIRTUAL TRY-ON" label in the top header bar
+   *
+   *  #session-countdown        — pill badge (top-right) showing remaining session
+   *                              time, e.g. "1:00". Visible only while streaming.
+   *  #session-countdown-display — the numeric time inside that pill ("1:00")
+   *  .session-countdown-info-btn — the ⓘ icon next to the countdown number
+   *
+   *  #session-ended-overlay    — frosted-glass card shown when the free session
+   *                              expires ("Your free session is up.")
+   *  .session-ended-title      — headline text inside that card
+   *  .session-action-btn       — the two CTA buttons inside the card:
+   *                              "Start again" (ghost) and
+   *                              "Get more try-ons" (black/primary)
+   *  .session-save-btn         — "Save your session" link below the CTA buttons
+   *
+   *  #session-recap-overlay    — full-bleed post-session screen: the session
+   *                              plays back on a loop above [Close] and
+   *                              [Share with a friend]
+   *  .session-recap-title      — "Your try-on" label above that player
+   *
+   *  #session-live-save        — footer button (bottom-right area) to save /
+   *                              share the try-on recording while session is live
+   *
+   * MOBILE CHANGES (all font sizes bumped ~1–2 steps; countdown significantly bigger):
+   *  #widget-title-text        10px  → 13px
+   *  #session-countdown-display 9px  → 18px  (most prominent — user needs to see it clearly)
+   *  .session-countdown-info-btn 9px → 11px
+   *  .session-ended-title      15px  → 17px
+   *  .session-action-btn       12px  → 14px  (taller padding too: 11px → 13px)
+   *  .session-save-btn         11px  → 13px
+   *  #session-live-save         9px  → 11px
+   *  #session-ended-overlay max-width 300px → 360px (more breathing room on wider phones)
+   *
+   * Same (max-width: 768px) and (min-height: 700px) guard — see note above. */
+  @media (max-width: 768px) and (min-height: 700px) {
+    /* Header title — mobile bump */
+    #anywear-title-wordmark { font-size: 16px; }
+    #widget-title-subtext { font-size: 14px; }
+
+    /* Countdown pill — the remaining-session timer (top-right) */
+    #session-countdown { padding: 6px 14px; }
+    #session-countdown-display { font-size: 18px; } /* significantly bigger — key info */
+    .session-countdown-info-btn { font-size: 11px; }
+
+    /* "Your free session is up" card — overlay shown when session expires */
+    #session-ended-overlay { max-width: 360px; padding: 26px 22px 22px; }
+    .session-ended-title { font-size: 17px; }   /* card headline */
+    .session-action-btn { font-size: 14px; padding: 13px 16px; } /* "Start again" / "Pay…" */
+    .session-save-btn { font-size: 13px; }       /* "Save your session" link */
+
+    /* Post-session recap — the label only. The player is sized by flex and the
+       two buttons ride .session-action-btn's bump three lines up. */
+    .session-recap-title { font-size: 13px; }
+
+    /* Footer live-save button — share/save recording while session is active */
+    #session-live-save { font-size: 11px; }
+  }
+
+  /* ── Shimmer ── */
+  @keyframes decart-shimmer {
+    100% {
+      mask-position: left center;
+      -webkit-mask-position: left center;
+    }
+  }
+  #shimmer {
+    display: none;
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+    z-index: 5;
+  }
+  #shimmer .shine1 {
+    position: absolute; inset: 0;
+    background: rgba(255,255,255,0.50);
+    -webkit-mask: linear-gradient(-60deg, transparent 30%, white 50%, transparent 70%) right/350% 100%;
+    mask: linear-gradient(-60deg, transparent 30%, white 50%, transparent 70%) right/350% 100%;
+    animation: decart-shimmer 2.5s linear infinite;
+  }
+  #shimmer .shine2 {
+    position: absolute; inset: 0;
+    background: rgba(255,255,255,0.30);
+    -webkit-mask: linear-gradient(-40deg, transparent 35%, white 50%, transparent 65%) right/450% 100%;
+    mask: linear-gradient(-40deg, transparent 35%, white 50%, transparent 65%) right/450% 100%;
+    animation: decart-shimmer 3.5s 1.1s linear infinite;
+  }
+
+  /* ── Idle placeholder ── */
+  /* DEFAULT IS HIDDEN, AND THAT IS THE FIX FOR ROW 79 — do not put `flex` back.
+     The parser inserts this div ~150ms before any script can speak, so a default
+     of `display:flex` meant "Enable Camera" was on screen for that whole window
+     for EVERY shopper, including the returning ones who granted the camera long
+     ago and whose prompt was then snatched away again. Nothing that runs later
+     can un-paint that; the only cure is not to paint it.
+     The bundle owns this property from its first statement (it sets the inline
+     display from camKnownGranted at module scope, and renderUI writes an
+     explicit `flex`/`none` thereafter), so a shopper who genuinely needs the
+     prompt still gets it a script earlier than they used to. */
+  #idle-placeholder {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    padding: 58px 28px 28px;
+    z-index: 1;
+    background: none;
+  }
+  .idle-eyebrow {
+    margin-bottom: 10px;
+  }
+  .cam-icon-ring {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    border: 1px solid rgba(0,0,0,0.18);
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 12px;
+  }
+  .cam-icon-ring svg { color: rgba(0,0,0,0.55); }
+  #idle-placeholder p.title {
+    font-size: 22px;
+    font-weight: 300;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #1a1a1a;
+    text-align: center;
+    line-height: 1.1;
+  }
+  #idle-placeholder p.sub {
+    text-align: center;
+    margin-top: 8px;
+  }
+
+  /* ── Legal links — bottom of idle/camera screen ── */
+  #idle-legal {
+    margin-top: auto;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px 12px;
+  }
+  #idle-legal a {
+    font-size: 10px;
+    color: rgba(0, 0, 0, 0.35);
+    text-decoration: none;
+    white-space: nowrap;
+    transition: color 0.15s;
+  }
+  #idle-legal a:hover { color: rgba(0, 0, 0, 0.65); }
+
+  /* ── Connecting overlay ── */
+  #connecting-overlay {
+    position: absolute;
+    inset: 0;
+    background: transparent;  /* video behind handles the background */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    z-index: 10;
+  }
+  #connecting-overlay p {
+    font-size: 13px;
+    color: rgba(255,255,255,0.80);
+  }
+  /* ── Queue card ──
+   * While the server reports a queue position, widget.bundle.js adds
+   * .queue-active to #connecting-overlay: the plain spinner + "Loading..."
+   * hide and this card shows instead. Same design language as
+   * #session-ended-overlay (the "your time is up" card): light #f7f6f5,
+   * radius 16, deep shadow — big readable text instead of white-on-video. */
+  #connecting-overlay.queue-active > .spinner,
+  #connecting-overlay.queue-active > #connecting-msg { display: none; }
+  #queue-card {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 14px;
+    width: calc(100% - 32px);
+    max-width: 300px;
+    background: #f7f6f5;
+    border-radius: 0;
+    padding: 26px 22px;
+    box-shadow: 0 12px 48px rgba(0,0,0,0.22), 0 2px 8px rgba(0,0,0,0.08);
+  }
+  #connecting-overlay.queue-active #queue-card { display: flex; }
+  #queue-card .spinner {          /* dark spinner variant for the light card */
+    border-color: rgba(0,0,0,0.12);
+    border-top-color: rgba(0,0,0,0.65);
+  }
+  /* ── Lane chip + lane note ──
+   * The two-lane story ("Fast queue" vs "Queue"), and they are EMPTY here on
+   * purpose. Every character they display arrives on the queue poll response
+   * (lane_label / lane_note) — see backend/QUEUE_SYSTEM.md § Lanes. Nothing in
+   * this file may name a lane: a lane name is the shopper-facing name of the
+   * thing we charge for, and docs/billing/widget-contract.md §6 keeps that kind
+   * of copy off the Chrome Web Store review path. Both stay display:none until
+   * the queue-rendering code is handed a string, so an older backend that sends
+   * no lane fields renders exactly the card that shipped before lanes existed.
+   */
+  #queue-lane-label {
+    display: none;
+    align-self: center;
+    padding: 3px 10px;
+    border-radius: 0;
+    background: rgba(0,0,0,0.06);
+    color: #4a4946 !important;
+    font-size: 11px !important;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    line-height: 1.4;
+    margin-bottom: -6px;          /* tighten against the headline below */
+  }
+  #connecting-queue-pos {
+    font-size: 21px !important;   /* overrides the 13px #connecting-overlay p rule */
+    font-weight: 600;
+    color: #1a1a1a !important;
+    line-height: 1.25;
+  }
+  #connecting-queue-eta {
+    font-size: 14px !important;
+    color: #6b6a67 !important;
+    margin-top: -6px;             /* tighten against the position line above */
+  }
+  #queue-lane-note {
+    display: none;
+    font-size: 12px !important;
+    color: #6b6a67 !important;
+    line-height: 1.4;
+    margin-top: -8px;             /* sits under the ETA, above the CTA */
+  }
+  /* Server-named waiting animation (loader_asset). The queue-rendering code
+     only ever sets this to a URL on the origin that sent it, and restores the
+     spinner if the image fails to load, so a bad value costs nothing. */
+  #queue-loader-img {
+    display: none;
+    width: 44px;
+    height: 44px;
+    object-fit: contain;
+  }
+  #queue-card.has-loader-asset > .spinner { display: none; }
+  #queue-card.has-loader-asset > #queue-loader-img { display: block; }
+  /* Queue-card purchase-intent probe: ghost pill + hidden coming-soon note.
+     The note needs !important overrides — #connecting-overlay p paints white. */
+  #queue-purchase-credits { margin-top: 4px; }
+  #queue-purchase-note {
+    display: none;
+    margin-top: 4px;
+    font-size: 12px !important;
+    color: #6b6a67 !important;
+    line-height: 1.4;
+  }
+  @media (max-width: 768px) {
+    #queue-card { max-width: 360px; }
+    #connecting-queue-pos { font-size: 25px !important; }
+    #connecting-queue-eta { font-size: 16px !important; }
+    #queue-purchase-note  { font-size: 13px !important; }
+    #queue-lane-label     { font-size: 12px !important; }
+    #queue-lane-note      { font-size: 13px !important; }
+  }
+  .spinner {
+    width: 32px; height: 32px;
+    border: 3px solid rgba(255,255,255,0.20);
+    border-top-color: rgba(255,255,255,0.85);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (max-width: 768px) {
+    .spinner { width: 64px; height: 64px; border-width: 5px; }
+  }
+
+  /* ── Auto-start loading composite ───────────────────────────────────────────
+     The wait for the first AI frame used to be an opaque field with the garment
+     un-blurring across it. The garment reveal still runs, but it has moved to a
+     corner thumbnail and the field itself is now a scrim over the shopper's own
+     camera — the same argument the billing card makes further down this file:
+     a wait is the moment the widget most needs to look alive, and a person
+     moving behind glass is what makes it look alive.
+
+     The scrim earns its second job too. Standing too close is the single most
+     common way a try-on comes out badly, and this is the one moment the shopper
+     is looking at the widget with nothing to do. So the frame carries an outline
+     to stand inside and an instruction to step back.
+
+     IMPORTANT: there is no pose detection here. The guide is shown to everyone
+     for the whole load, so nothing in this UI may assert that the shopper is
+     standing wrongly — it can only describe where to stand. Copy that accuses
+     ("Move back!") would be wrong most of the time it appeared. */
+
+  /* The cutout. Everything outside the figure goes near-black and only the
+     inside stays clear, so the shopper sees themselves through a person-shaped
+     window. This is why it beats an outline drawn over an even scrim: a shopper
+     standing too close sees their face fill the window and spill past it, which
+     is self-evident, where an outline is something you have to notice and
+     interpret. Stepping back until they sit inside the window needs no reading.
+
+     Deliberately symmetric: both videos are mirrored (scaleX(-1)), so an
+     asymmetric figure would contradict the reflection being framed.
+
+     preserveAspectRatio="xMidYMid meet" makes the figure fill the frame HEIGHT
+     and centre horizontally at every widget size. The dark is painted by a rect
+     far outside the viewBox, which still renders because an SVG viewport clips
+     to the element box, not to the viewBox — that is what covers the margins
+     "meet" leaves at the sides. */
+  .as-cut {
+    position: absolute; inset: 0;
+    pointer-events: none;
+  }
+  .as-cut svg { display: block; width: 100%; height: 100%; }
+
+  body:has(#__decart-as-ol) #connecting-overlay > .spinner,
+  body:has(#__decart-as-ol) #connecting-overlay > #connecting-msg {
+    display: none !important;
+  }
+
+  /* Same cause, different element: the bundle raises its "Drag a product image
+     here" card the moment the camera is live and no garment has landed yet,
+     which is squarely inside the loading window. It sits over the video, so it
+     reads through the cutout — the shopper sees an invitation to drag something
+     in while being told to step back, and it vanishes a second later. Suppress
+     it for as long as the mask owns the frame; the bundle keeps its own state
+     untouched and the card behaves normally the moment the overlay is gone. */
+  body:has(#__decart-as-ol) #bottom-zone .drag-hint-card {
+    display: none !important;
+  }
+
+  /* Legibility floor for the instruction: inside the cutout the camera runs at
+     full brightness, and white text over a sunlit room is unreadable. This is a
+     gradient rather than a slab so it never reads as a second panel. */
+  .as-veil {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 112px;
+    background: linear-gradient(rgba(0,0,0,0) 0%, rgba(0,0,0,0.62) 78%, rgba(0,0,0,0.72) 100%);
+    pointer-events: none;
+  }
+
+  /* Instruction block. Padded clear of the watermark (bottom-left) and the
+     garment thumbnail (bottom-right) so the three never collide at the 380px
+     floor, which is where most laptops render. */
+  .as-hint {
+    position: absolute; left: 0; right: 0; bottom: 15px;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 0 100px;
+    text-align: center;
+    pointer-events: none;
+  }
+  .as-hint-title {
+    font-size: 17px; font-weight: 600; letter-spacing: 0.01em;
+    color: #fff; line-height: 1.25;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.55);
+  }
+  /* Garment thumbnail — bottom RIGHT. The watermark owns bottom-left (and just
+     grew to 22px), so this is the only free corner. Inset matches the
+     watermark's 14px so the two read as a pair. */
+  .as-thumb {
+    display: none;   /* hidden for now — set to block to bring the garment back */
+    position: absolute; right: 14px; bottom: 14px;
+    width: 76px; height: 76px;
+    border-radius: 10px; overflow: hidden;
+    background: rgba(255,255,255,0.06);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.45), inset 0 0 0 1px rgba(255,255,255,0.14);
+    pointer-events: none;
+  }
+  .as-thumb img {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+  }
+
+  @media (max-width: 768px) {
+    .as-hint       { padding: 0 124px; bottom: 18px; }
+    .as-hint-title { font-size: 17px; }
+    .as-thumb      { width: 92px; height: 92px; }
+  }
+
+  /* The outline and the instruction are guidance, not decoration — reduced
+     motion suppresses movement, not information, so both stay. Only the
+     spinner's rotation is already covered by its own animation. */
+
+  /* ── Server-error overlay ── */
+  /*
+   * Shown when the token endpoint returns an error (servers overloaded / 5xx).
+   * z-index 25 — above everything except the session-ended overlay (30) and
+   * footer (31). The camera stream keeps running so retry is instant.
+   */
+  #server-error-overlay {
+    position: absolute;
+    inset: 0;
+    background: #f7f6f5;
+    display: none; /* flipped to flex by widget.bundle.js */
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    z-index: 25;
+    padding: 20px 28px;
+    text-align: center;
+  }
+  /* ── The BILLING arms of this overlay render as a card, not a sheet ────────
+     Added by the bundle (__decartBillingWait, and the billing arm of
+     __decartUnavailable) so the fallback surface matches the hosted ones from
+     this release: a small centred card over the shopper's own blurred camera
+     instead of a full opaque panel with a large dead area under two lines of
+     text. The blur is the same `billing-blur` class the hosted card states use
+     — one definition, one look, whether the surface came from the server or
+     stood in for it.
+
+     Only the BILLING arms. A real outage and a real ban keep the full sheet:
+     those are not moments to make pretty, and a card floating over a live
+     camera would imply the widget still works.
+
+     THE OVERLAY ITSELF BECOMES THE CARD. It cannot wrap its children in one —
+     the bundle owns that markup and is frozen until a Chrome release — so
+     instead of adding an element, the full-bleed panel shrinks to a centred box
+     that sizes to its own content (`inset:auto` + `height:auto`, still the same
+     flex column, so the existing children lay out unchanged).
+
+     THE SCRIM IS THE FIRST BOX-SHADOW: a 9999px spread ring paints everything
+     outside the card in one declaration, and #main-area's `overflow:hidden`
+     clips it to the widget. That is what dims the blurred camera without a
+     second element the bundle would have had to create. */
+  #server-error-overlay.se-card {
+    inset: auto;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: calc(100% - 40px);
+    max-width: 340px;
+    height: auto;
+    background: #fffffc;
+    border-radius: 0;
+    padding: 20px 18px;
+    box-shadow: 0 14px 44px rgba(23, 4, 4, 0.26),
+                0 0 0 9999px rgba(20, 12, 14, 0.34);
+  }
+  #server-error-overlay.se-card .server-error-title {
+    text-transform: none;
+    letter-spacing: -0.03em;
+    font-size: 21px;
+    font-weight: 400;
+  }
+  .server-error-icon {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    border: 1px solid rgba(0,0,0,0.15);
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 14px;
+    color: rgba(0,0,0,0.45);
+  }
+  .server-error-title {
+    font-size: 18px;
+    font-weight: 300;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #1a1a1a;
+    line-height: 1.3;
+  }
+  .server-error-sub {
+    font-size: 13px;
+    font-weight: 400;
+    color: rgba(0,0,0,0.52);
+    line-height: 1.55;
+    max-width: 230px;
+    margin-top: 8px;
+  }
+  .server-error-actions {
+    width: 100%;
+    margin-top: 22px;
+  }
+  /* The way out of "Servers Busy" (owner, 2026-08-14: the message must be
+     closable). Same corner as every other overlay's close. Hidden by the
+     bundle for the PERMANENT unavailable card, which deliberately has no way
+     back — only the retryable busy state gets an X. */
+  #server-error-close-btn {
+    position: absolute;
+    top: 10px; right: 10px;
+    width: 30px; height: 30px;
+    display: flex; align-items: center; justify-content: center;
+    border: none; border-radius: 0;
+    background: none;
+    color: rgba(0,0,0,0.45);
+    cursor: pointer;
+  }
+  #server-error-close-btn:hover { background: rgba(0,0,0,0.06); color: #1a1a1a; }
+
+  /* "Talk to an expert" + its hint, on the permanent unavailable card.
+     .session-action-btn:first-child paints the primary dark fill, and the
+     first child of .server-error-actions is the (hidden) retry button — so
+     the fill is restated here: on this card the link is the only control on
+     screen and must read as the primary one. */
+  #unavailable-contact-hint {
+    font-size: 12px;
+    font-weight: 400;
+    color: rgba(0,0,0,0.45);
+    text-align: center;
+    margin-bottom: 10px;
+  }
+  #unavailable-contact-btn {
+    text-decoration: none;
+    background: #1a1a1a;
+    color: #fff;
+    border: none;
+    font-weight: 500;
+  }
+  #unavailable-contact-btn:hover { background: #333; color: #fff; }
+
+  /*
+   * ── Border-beam animation ─────────────────────────────────────────────────
+   * @property lets Chrome interpolate --btn-angle as a real CSS angle so the
+   * conic-gradient rotates smoothly (no JS, no transform tricks needed).
+   *
+   * Shared by: #camera-btn  AND  .action-btn--buy
+   * Tweak the look via the :root tokens above — no need to touch this block.
+   */
+  @property --btn-angle {
+    syntax: '<angle>';
+    initial-value: 0deg;
+    inherits: false;
+  }
+  @keyframes btn-border-spin {
+    to { --btn-angle: 360deg; }
+  }
+
+  /* Both beam buttons need a stacking context for ::before */
+  #camera-btn,
+  .action-btn--buy,
+  .drag-hint-card { position: relative; }
+  /* #widget-title-icon already has position:relative from its own rule */
+  #widget-title-icon::before { border-radius: 0; }
+
+  /* Single shared beam layer — applies to every beam button + drag pill + title icon */
+  #camera-btn::before,
+  .action-btn--buy::before,
+  .drag-hint-card::before,
+  #widget-title-icon::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: 0;
+    padding: var(--beam-width);
+    background: conic-gradient(
+      from var(--btn-angle),
+      transparent          0%,
+      transparent         62%,
+      var(--beam-fade)    74%,
+      var(--beam-peak)    84%,
+      var(--beam-fade)    94%,
+      transparent        100%
+    );
+    -webkit-mask: linear-gradient(#fff 0 0) content-box,
+                  linear-gradient(#fff 0 0);
+    mask: linear-gradient(#fff 0 0) content-box,
+          linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: btn-border-spin var(--beam-duration) linear infinite;
+    pointer-events: none;
+  }
+
+  /* ── Bottom zone (try button / drag hint / buy now) ── */
+  #bottom-zone {
+    position: absolute;
+    left: 12px; right: 12px;
+    bottom: 56px; /* raised to clear the "Powered by Decart" footer (≈26px) */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    /* 12: above #local-video (9) — at 6 the camera feed painted OVER the
+       drag-hint pill, hiding it whenever the camera was live with no garment
+       (the state machine was fine; the hint was rendered underneath). */
+    z-index: 12;
+  }
+
+  /*
+   * .buy-now-btn is still emitted by widget.bundle.js but the inline script
+   * below intercepts it and swaps it out for the two-button action-row.
+   * We keep a stub here so nothing explodes if the swap races.
+   */
+  .buy-now-btn { display: none; }
+
+  /* ── Two-button action row — side by side ── */
+  .action-row {
+    display: none;
+  }
+  .action-btn {
+    display: block;
+    flex: 1;
+    padding: 12px 10px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-align: center;
+    text-decoration: none;
+    border-radius: 0;
+    cursor: pointer;
+    transition: opacity 0.15s;
+    font-family: inherit;
+  }
+  .action-btn:hover { opacity: 0.80; }
+  /* Buy Now — green pill matching the screenshot */
+  .action-btn--buy {
+    --beam-peak: rgba(255,255,255,0.70);
+    --beam-fade: rgba(255,255,255,0.30);
+    background: #10b981;
+    color: #fff;
+    border: none;
+    box-shadow: 0 4px 16px rgba(16,185,129,0.40);
+  }
+  .action-btn--buy:hover { opacity: 0.90; }
+  /* Add to Bag — hidden in this layout (single button matches screenshot) */
+  .action-btn--cart {
+    display: none;
+  }
+
+  .applying-label { display: none !important; }
+
+  .try-product-btn {
+    width: 100%;
+    padding: 10px;
+    background: #10b981;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    border: none;
+    border-radius: 0;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(16,185,129,0.4);
+    transition: background 0.15s;
+  }
+  .try-product-btn:hover { background: #059669; }
+  .try-product-btn:active { background: #047857; }
+
+  /*
+   * Drag hint — slim frosted pill pinned to the widget bottom.
+   * Camera feed stays mostly visible; pill is a single line:
+   *   [camera icon]  Drag a product image  |  Browse files
+   */
+
+  /* Full-screen vignette — top and bottom darkening for header/footer legibility */
+  #main-area.ma-active::before,
+  #main-area.ma-dragover::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(to bottom,  rgba(0,0,0,0.42) 0%,   transparent 28%),
+      linear-gradient(to top,     rgba(0,0,0,0.52) 0%,   transparent 42%);
+    pointer-events: none;
+    z-index: 4;
+  }
+
+  /*
+   * Camera feed blur/darkening — disabled so the user can see themselves fully.
+   * Uncomment to re-enable (e.g. blur(1.5px) brightness(0.85) for a subtle look).
+   */
+  /*
+  #main-area:has(#bottom-zone .drag-hint-card) #local-video,
+  #main-area:has(#bottom-zone .drag-hint-card) #remote-video {
+    filter: blur(1.5px) brightness(0.85);
+    transition: filter 0.5s ease;
+  }
+  */
+
+  /* #bottom-zone stays at its natural bottom position — no full-screen expansion */
+
+  /* ── Slim pill ── */
+  .drag-hint-card {
+    width: fit-content;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    border: none;
+    border-radius: 0;
+    padding: 16px 20px;
+    background: rgba(20,20,20,0.45);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1.5px dashed rgba(255,255,255,0.45);
+    box-shadow: 0 2px 12px rgba(0,0,0,0.18);
+  }
+  /* ::before is the beam — only suppress ::after (old "DROP TO STYLE" pill) */
+  .drag-hint-card::after { content: none; }
+
+  /* Camera icon — small, no ring background */
+  .drag-hint-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    background: none;
+    border-radius: 0;
+    margin: 0;
+    flex-shrink: 0;
+    color: rgba(255,255,255,0.85);
+  }
+  .drag-hint-icon svg { width: 18px; height: 18px; }
+
+  /* Title inline, grows to fill space */
+  .drag-hint-title {
+    font-size: 17px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    text-transform: none;
+    color: #fff;
+    white-space: nowrap;
+    text-shadow: none;
+    line-height: 1;
+    margin: 0;
+  }
+
+  /* Sub hidden — we keep it empty anyway */
+  .drag-hint-sub { display: none !important; }
+
+  /* OR row → thin vertical separator bar */
+  .drag-hint-or {
+    display: block;
+    width: 1px;
+    height: 14px;
+    background: rgba(255,255,255,0.30);
+    flex-shrink: 0;
+    margin: 0;
+  }
+  .drag-hint-or-line,
+  .drag-hint-or-text { display: none; }
+
+  /* Browse and OR divider hidden — drag-only UX */
+  .drag-hint-browse-wrap,
+  .drag-hint-or { display: none !important; }
+
+  /* Browse wrap — no extra margin */
+  .drag-hint-browse-wrap { margin: 0; }
+
+  /* Browse button — plain inline text, no border/bg */
+  .drag-hint-browse {
+    background: none;
+    border: none;
+    color: rgba(255,255,255,0.82);
+    font-size: 13px;
+    font-weight: 400;
+    letter-spacing: 0.01em;
+    text-transform: none;
+    padding: 0;
+    border-radius: 0;
+    cursor: pointer;
+    font-family: inherit;
+    white-space: nowrap;
+    transition: color 0.15s;
+  }
+  .drag-hint-browse:hover { color: #fff; }
+
+  /* ── Drag overlay ── */
+  #drag-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(139,92,246,0.20);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+  #drag-overlay-label {
+    background: #fff;
+    border-radius: 0;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #111827;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  }
+
+  /* ── Camera button — flows inside #idle-placeholder below the text ── */
+  #camera-btn-wrap {
+    width: 100%;
+    margin-top: 16px;
+  }
+  #camera-btn {
+    width: 100%;
+    padding: 15px;
+    border: none;
+    border-radius: 0;
+    background: #1a1a1a;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #fff;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.15s, box-shadow 0.15s;
+    /* Brighter beam tokens for dark CTA — overrides :root defaults */
+    --beam-peak: rgba(255, 255, 255, 0.95);
+    --beam-fade: rgba(255, 255, 255, 0.35);
+    box-shadow: 0 0 18px rgba(255,255,255,0.10), 0 4px 14px rgba(0,0,0,0.28);
+  }
+  /* Override the shared ::before border-radius to match sharp corners */
+  #camera-btn::before { border-radius: 0; }
+  #camera-btn:hover {
+    background: #2a2a2a;
+    box-shadow: 0 0 26px rgba(255,255,255,0.18), 0 4px 14px rgba(0,0,0,0.28);
+  }
+  #camera-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  /* ── Footer — bare text printed on top of the video, no background ── */
+  #footer {
+    position: absolute;
+    bottom: 5px; left: 0; right: 0;
+    z-index: 31; /* above session-ended overlay (30) so it always shows */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    opacity: 0.28;
+    transition: opacity 0.25s;
+  }
+  #__decart-conn-indicator {
+    opacity: 0.28;
+    transition: opacity 0.25s;
+  }
+  #root:hover #footer,
+  #root:hover #__decart-conn-indicator { opacity: 1; }
+  /*
+   * .footer-inner is inline-flex (column) so it shrinks to wrap only the text.
+   * The ::after line's width:100% therefore equals exactly the text width —
+   * giving the "line just under the brand name" editorial effect.
+   */
+  .footer-inner {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
+  .footer-text-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 5px;
+  }
+  .footer-inner::after { display: none; }
+  /* Default: dark text — covers idle, connecting, session-ended, dragover.
+     !important beats any white-text rules the bundle injects at runtime.    */
+  #footer span.by {
+    font-size: 11px; color: rgba(0,0,0,0.45) !important; letter-spacing: 0.03em;
+    text-shadow: none !important;
+  }
+  #footer a.brand {
+    font-size: 11px; font-weight: 400;
+    color: rgba(0,0,0,0.45) !important; letter-spacing: 0.03em;
+    text-decoration: none;
+    pointer-events: all;
+    text-shadow: none !important;
+  }
+  /* Hover reads as a link: darken AND underline. Colour alone was too weak a
+     cue at 11px/0.45 alpha to tell anyone the text was clickable. */
+  #footer a.brand:hover { color: rgba(0,0,0,0.70) !important; text-decoration: underline; }
+  #manage-account-btn {
+    background: none; border: none; padding: 0; cursor: pointer; font-family: inherit;
+    font-size: 11px; font-weight: 600; color: rgba(0,0,0,0.45) !important;
+    letter-spacing: 0.03em; text-shadow: none !important; pointer-events: all;
+  }
+  #manage-account-btn:hover { color: rgba(0,0,0,0.70) !important; text-decoration: underline; }
+
+  /* Streaming: flip to white only when the AI video is genuinely live.
+     Excludes session-ended (.session-ended class added by widget-init.js). */
+  #root:has(#main-area.ma-active:not(.session-ended)) #footer span.by {
+    color: #afafaf !important;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.65) !important;
+  }
+  #root:has(#main-area.ma-active:not(.session-ended)) #footer a.brand {
+    color: #afafaf !important;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.65) !important;
+  }
+
+  /* ── Session-ended bubble ────────────────────────────────────────────────── */
+  /*
+   * Compact floating card shown when the session ends (inactivity or image cap).
+   * Centered over the (now-black) stopped video — not full-screen.
+   * z-index 30 sits above the video and shimmer but below the auto-start overlay.
+   *
+   * Two CTAs:
+   *   "Get more try-ons" (primary/black) — purchase-intent signal
+   *   "Start again"      (ghost)          — free session restart
+   */
+  /* Blur backdrop — appears behind the card when session ends */
+  #main-area.session-ended::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    background: rgba(0,0,0,0.28);
+    z-index: 149; /* just below session-ended-overlay (150) */
+    pointer-events: none;
+  }
+
+  #session-ended-overlay {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: calc(100% - 32px);
+    max-width: 300px;
+    z-index: 150; /* above any bundle-injected UI (server-error=25, header=20, shimmer=5) */
+    display: none; /* flipped to flex by widget-init.js */
+    flex-direction: column;
+    align-items: flex-start;
+    background: #f7f6f5;
+    border-radius: 0;
+    padding: 22px 20px 18px;
+    box-shadow: 0 12px 48px rgba(0,0,0,0.22), 0 2px 8px rgba(0,0,0,0.08);
+    pointer-events: auto; /* explicit — ensures no inherited pointer-events:none */
+  }
+  .session-ended-title {
+    font-size: 15px;
+    font-weight: 400;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #1a1a1a;
+    line-height: 1.3;
+  }
+  /* Action buttons */
+  .session-ended-actions {
+    width: 100%;
+    margin-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .session-action-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    padding: 11px 16px;
+    background: transparent;
+    border: 1px solid rgba(0,0,0,0.23);
+    border-radius: 0;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(0,0,0,0.62);
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .session-action-btn:hover {
+    background: rgba(0,0,0,0.05);
+    border-color: rgba(0,0,0,0.30);
+    color: rgba(0,0,0,0.85);
+  }
+  /* Primary action — dark fill */
+  .session-action-btn:first-child {
+    background: #1a1a1a;
+    color: #fff;
+    border: none;
+    font-weight: 500;
+  }
+  .session-action-btn:first-child:hover { background: #333; }
+  /* Bubble dismiss × — top-right of card */
+  .session-bubble-dismiss {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    background: none;
+    border: none;
+    color: rgba(0,0,0,0.28);
+    font-size: 17px;
+    line-height: 1;
+    padding: 2px 4px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: color 0.15s;
+  }
+  .session-bubble-dismiss:hover { color: rgba(0,0,0,0.60); }
+
+  /* ── Share button — lives inside .insta-rail, shown after first garment ── */
+  #session-live-save {
+    display: none;         /* toggled to flex by widget-init.js after first garment */
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    padding: 4px;
+    cursor: pointer;
+    color: #fff;
+    opacity: 0.90;
+    pointer-events: auto;
+    filter: drop-shadow(0 1px 3px rgba(0,0,0,0.90)) drop-shadow(0 2px 8px rgba(0,0,0,0.60));
+    transition: opacity 0.15s, transform 0.15s;
+  }
+  #session-live-save:hover { opacity: 1 !important; transform: scale(1.18); }
+
+  /* ── Session recording save link ───────────────────────────────────────────── */
+  /*
+   * Sits below the two action buttons in #session-ended-overlay.
+   * Hidden by default; shown by widget-init.js inside showSessionEnded()
+   * only when recording was active (= at least one garment was tried).
+   *
+   * Two states:
+   *   .session-save-loading — blob still assembling; "Loading..." + pulsing dim
+   *   (class removed by JS)  — blob ready; "Save your session" + underline link
+   */
+  #session-save-wrap {
+    display: none;   /* toggled to block by JS in showSessionEnded */
+    width: 100%;
+    text-align: center;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(0,0,0,0.07);
+  }
+  .session-save-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.06em;
+    color: rgba(0,0,0,0.38);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    transition: color 0.15s;
+  }
+  .session-save-btn:not(.session-save-loading):hover {
+    color: rgba(0,0,0,0.72);
+  }
+  /* Loading state — pulsing dim, no pointer events, no underline */
+  .session-save-btn.session-save-loading {
+    cursor: default;
+    text-decoration: none;
+    pointer-events: none;
+    animation: session-save-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes session-save-pulse {
+    0%, 100% { opacity: 0.30; }
+    50%       { opacity: 0.55; }
+  }
+
+  /* ── Post-session recap ─────────────────────────────────────────────────────── */
+  /*
+   * The stage between "the session ended" and what's next. Shown by
+   * showSessionRecap() in widget-init.js; dismissed by its Close button, which
+   * is what then performs the what's-next (close the widget, or back to the
+   * drag screen). See docs/post-session-recap-ux.md.
+   *
+   * FULL-BLEED, NOT A CARD. Every other overlay here is a card floating over
+   * the video because the video is still the subject. Here the video IS the
+   * subject: the whole reason this screen exists is that the widget is too
+   * small to see yourself in while the session runs, so the player gets every
+   * pixel of the frame that is not a button. A card would reproduce the exact
+   * problem the screen was built to solve.
+   *
+   * z-index 160: above the session-ended bubble (150) and its blur backdrop
+   * (149) — a card must never poke through this screen — and below
+   * #billing-frame-wrap (200), which still has to be able to cover it.
+   */
+  #session-recap-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 160;
+    display: none;          /* flipped to flex by widget-init.js */
+    flex-direction: column;
+    background: #f7f6f5;
+    padding: 14px 14px 16px;
+    gap: 12px;
+    pointer-events: auto;
+  }
+  .session-recap-title {
+    flex-shrink: 0;
+    margin: 0;
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(0,0,0,0.45);
+    text-align: center;
+  }
+  /* Player frame — takes every pixel left over after the title and the buttons. */
+  #session-recap-player {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;          /* lets the flex child actually shrink inside #root */
+    background: #000;
+    overflow: hidden;
+  }
+  #session-recap-video {
+    display: none;          /* shown once the blob is attached */
+    width: 100%;
+    height: 100%;
+    /* contain, not cover: this is a review screen — cropping the look the
+       shopper came here to inspect would defeat the point. */
+    object-fit: contain;
+    background: #000;
+  }
+  /*
+   * NO scaleX(-1) HERE — unlike #local-video / #remote-video.
+   * recording.js already bakes the mirror into every captured frame (see its
+   * MIRROR TRANSFORM note), so flipping again would play the session back
+   * un-mirrored and wrong.
+   */
+  /* The recording is canvas-captured video with NO audio track at all, so the
+     native mute toggle is a control over nothing. Chromium-only pseudo-element;
+     everywhere else this rule is simply ignored and the button stays — which is
+     cosmetic, not broken. Nothing else in the control set is touched: the play,
+     scrub and fullscreen controls are the entire point of this player. */
+  #session-recap-video::-webkit-media-controls-mute-button { display: none; }
+  #session-recap-status {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 20px;
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.55);
+    text-align: center;
+  }
+  #session-recap-status.session-recap-waiting {
+    animation: session-save-pulse 1.4s ease-in-out infinite;
+  }
+  /* Expand button — top-right of the player.
+     Native controls carry their own fullscreen button, but only when this
+     document is allowed to enter fullscreen at all; inside an iframe that is
+     the embedder's call, not ours. This button is the one affordance that
+     always does something: element fullscreen where it is permitted, and
+     otherwise it asks the host to grow the widget panel instead. */
+  #session-recap-expand {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+    display: none;          /* shown with the video */
+    align-items: center;
+    justify-content: center;
+    padding: 6px;
+    background: rgba(0,0,0,0.45);
+    border: none;
+    border-radius: 0;
+    color: #fff;
+    cursor: pointer;
+    opacity: 0.85;
+    transition: opacity 0.15s, transform 0.15s;
+  }
+  #session-recap-expand:hover { opacity: 1; transform: scale(1.08); }
+  /* Actions — Close then Share, side by side. Share carries the dark fill: the
+     whole stage exists to get it pressed, and Close is the safe default that
+     needs no encouragement. */
+  .session-recap-actions {
+    flex-shrink: 0;
+    display: flex;
+    gap: 8px;
+  }
+  .session-recap-actions .session-action-btn { flex: 1 1 0; }
+  /*
+   * .session-action-btn's own `:first-child` rule paints the FIRST button dark.
+   * Close is first here, so that rule is cancelled and re-aimed at Share —
+   * otherwise the dark fill lands on the button we are trying not to push.
+   */
+  .session-recap-actions .session-action-btn:first-child {
+    background: transparent;
+    color: rgba(0,0,0,0.62);
+    border: 1px solid rgba(0,0,0,0.23);
+    font-weight: 400;
+  }
+  .session-recap-actions .session-action-btn:first-child:hover {
+    background: rgba(0,0,0,0.05);
+    border-color: rgba(0,0,0,0.30);
+    color: rgba(0,0,0,0.85);
+  }
+  #session-recap-share {
+    background: #1a1a1a;
+    color: #fff;
+    border: none;
+    font-weight: 500;
+  }
+  #session-recap-share:hover { background: #333; }
+  /* Disabled until the blob is assembled — there is nothing to share yet. */
+  #session-recap-share[disabled] {
+    opacity: 0.45;
+    cursor: default;
+    pointer-events: none;
+  }
+
+  /* ── Inactivity countdown badge ────────────────────────────────────────────── */
+  /*
+   * Sits just above the "● Active / ● Inactive" connection indicator (bottom:8px).
+   * Visible only while the session is live — shown by widget-init.js onSessionLive,
+   * hidden by showSessionEnded. Mirrors the inactivity setTimeout exactly.
+   */
+  #session-countdown {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 31;
+    background: #000000c2;
+    font-weight: bold;
+    display: none;       /* shown by widget-init.js */
+    align-items: center;
+    gap: 5px;
+    pointer-events: none;
+    padding: 5px 10px;
+    border-radius: 0;
+  }
+  #session-countdown-display {
+    font-family: inherit;
+    font-size: 9px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    color: rgba(255,255,255,0.72);
+    text-shadow: 0 1px 4px rgba(0,0,0,0.80);
+    font-variant-numeric: tabular-nums;
+    transition: color 0.4s;
+    line-height: 1;
+  }
+  .session-countdown-info-wrap {
+    position: relative;
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+  }
+  .session-countdown-info-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: default;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255,255,255,0.40);
+    text-shadow: 0 1px 4px rgba(0,0,0,0.80);
+    font-size: 9px;
+    font-family: inherit;
+    line-height: 1;
+    transition: color 0.15s;
+  }
+  .session-countdown-info-wrap:hover .session-countdown-info-btn {
+    color: rgba(255,255,255,0.80);
+  }
+  .session-countdown-tooltip {
+    display: none;
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    width: 174px;
+    background: rgba(10,10,10,0.88);
+    color: rgba(255,255,255,0.88);
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    line-height: 1.55;
+    padding: 8px 10px;
+    border-radius: 0;
+    pointer-events: none;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+    z-index: 100;
+  }
+  .session-countdown-info-wrap:hover .session-countdown-tooltip {
+    display: block;
+  }
+
+  /* ── Instagram-style engagement rail — left side, only during active session ── */
+  .insta-rail {
+    position: absolute;
+    left: 14px;
+    bottom: 56px;
+    z-index: 31;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    pointer-events: none;
+  }
+  #root:has(#main-area.ma-streaming) .insta-rail {
+    display: flex;
+  }
+  /* Plan cog — inline with the "AI can make mistakes" disclaimer. Deliberately
+     the quietest control in the footer: discoverable, never competing with the
+     try-on itself. Sized to the disclaimer text, not to the thumb buttons. */
+  .footer-cog {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    opacity: 1;
+    cursor: pointer;
+    vertical-align: middle;
+    font-size: 11px;
+    letter-spacing: 0.03em;
+    /* LOAD-BEARING — without this the cog is painted and inert.
+       #footer is pointer-events:none on purpose (it spans the full width over
+       the video, and must not swallow clicks meant for the stream behind it),
+       so EVERY interactive child has to opt back in individually — see
+       `#footer a.brand`, which does. This button did not, so its clicks
+       hit-tested straight through to #idle-placeholder and the listener never
+       fired: document.elementFromPoint() over the cog's centre returned the
+       video, not the button.
+       That looks exactly like a missing event handler, which is why it survived
+       several rounds of JS "fixes" to _wireCog() in billing.js — the listener
+       was always attached (data-decart-wired="1" in the live DOM); the click
+       simply never arrived. Do not remove. Any new interactive control added
+       inside #footer needs this line too; scripts/check.mjs §10 enforces it. */
+    pointer-events: all;
+    transition: opacity 0.15s ease;
+  }
+  .footer-cog:hover { text-decoration: underline; }
+  .footer-cog:focus-visible { outline: 1.5px solid currentColor; outline-offset: 2px; border-radius: 4px; }
+  /* The cog inherits black from #footer, which is right on the light idle/ended
+     states but unreadable once the AI video is behind it. The disclaimer text
+     already flips to #afafaf there (rule above); the cog — and the try-ons badge
+     inside it — has to flip with it or the footer reads in two different colours. */
+  #root:has(#main-area.ma-active:not(.session-ended)) .footer-cog {
+    color: #afafaf;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.65);
+  }
+
+  /* ── Try-ons-left badge ────────────────────────────────────────────────────
+     A shirt and an integer — 👕 7 — and deliberately nothing else. No plan name,
+     no price, no word about money: all of that lives in the hosted panel, for the
+     release-cadence reason documented at the top of widget-init.js's billing
+     section. The number itself is /status's tryon_sessions, computed server-side.
+
+     Two instances of the same badge, for two different jobs:
+
+       #tryons-left   — inside the footer cog, so the balance can be checked
+                        without starting a try-on. Follows the cog's own gating:
+                        the cog is display:none until /status says billing_enabled
+                        and forever on hosts with no installation_id, which hides
+                        this with it for free.
+
+       #tryons-flash  — over the video. Appears for ~2s after a try-on ends (the
+                        "watch it go down" feedback) and stops fading once the
+                        balance reaches the low-water mark, because zero is a
+                        hard cut-off and the shopper needs warning before it. */
+  .tryons-badge {
+    display: none;             /* .tryons-on is added by widget-init.js once known */
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums;   /* 7 → 6 must not shift the layout */
+  }
+  .tryons-badge.tryons-on { display: inline-flex; }
+  /* Sits left of the cog glyph inside the same button, so the count and the way
+     to act on it are one affordance rather than two things to find. */
+  #tryons-left { margin-right: 4px; }
+
+  /* Top-left, mirroring #session-countdown's pill in the opposite corner —
+     bottom-left is the connection indicator and bottom-right is .insta-rail, so
+     this is the only free corner. Quiet on purpose: it must not compete with the
+     try-on. Hidden via opacity/visibility rather than display so it can fade. */
+  #tryons-flash {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 31;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 10px;
+    border-radius: 0;
+    background: #000000c2;
+    color: rgba(255,255,255,0.82);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: 0.03em;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.80);
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.45s ease, visibility 0.45s;
+  }
+  #tryons-flash.tf-show { opacity: 1; visibility: visible; }
+  #tryons-flash.tf-zero { pointer-events: auto; cursor: pointer; }
+  #tryons-flash.tf-zero:hover { text-decoration: underline; }
+
+  .session-thumb-btn {
+    background: none;
+    border: none;
+    padding: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    opacity: 0.90;
+    pointer-events: auto;
+    filter: drop-shadow(0 1px 3px rgba(0,0,0,0.90)) drop-shadow(0 2px 8px rgba(0,0,0,0.60));
+    transition: opacity 0.15s, transform 0.15s;
+  }
+  .session-thumb-btn:hover { opacity: 1 !important; transform: scale(1.18); }
+  .session-thumb-btn.thumb-selected  { opacity: 1 !important; }
+  .session-thumb-btn.thumb-dimmed    { opacity: 0.20 !important; }
+  #session-thumb-up.thumb-selected svg { fill: #ef4444; stroke: #ef4444; }
+
+  /* ── Billing panel container — holds the hosted /billing/panel iframe ──
+     A sheet anchored to the bottom of the widget rather than a small popover:
+     the panel is a full billing UI (plans, checkout, cancellation), not a
+     two-line summary, so it needs real room in a ~380px widget. Height is
+     driven by the panel's own `resize` postMessage and capped so it can never
+     grow past the widget. */
+  /* A PAGE STATE, NOT A POPUP.
+     This used to be an inset card — 8px sides, 34px off the bottom, a 12px
+     radius, a drop shadow and a dark backdrop behind it. Five separate signals
+     that said "modal", for something that is really just another screen of the
+     widget. It read as an interruption rather than as where you now are.
+     Full-bleed, square, flat and backdrop-free, the hosted page simply IS the
+     widget surface for that moment — which is also what makes it extensible:
+     any new state is a URL the server chooses, with no Chrome release and no
+     visual seam between "the widget" and "a billing page". */
+  #billing-frame-wrap {
+    display: none;
+    position: absolute;
+    inset: 0;
+    max-height: 100%;
+    /* Above EVERY overlay that can launch it, not just the rail. The three pay
+       CTAs live on the session-ended bubble (z-index 150), the server-error /
+       paywall card (25) and the queue card inside #connecting-overlay (10), and
+       the panel has to cover whichever one was clicked — at 42 it opened behind
+       the session-ended bubble and looked like a dead button. */
+    z-index: 200;
+    background: #fff;
+    /* No radius, no shadow — a state does not float above the thing it is part of. */
+    overflow: hidden;
+    pointer-events: all;
+  }
+  /* CENTRED, NOT TOP-ALIGNED (owner, 2026-08-17: "maybe better inside padding
+     will make it more aesthetic?").
+     The sheet is sized by the page's own `resize` message — that is the
+     contract and it stays — but the frame was pinned to the TOP of a wrap that
+     paints white all the way down, so a 285px panel in a 376px widget left 91px
+     of blank white under it. Measured, and it reads as broken rather than
+     spacious. Centring the frame splits that space evenly above and below,
+     which is what makes the same content look deliberate. No second sizing
+     mechanism: the height still comes from the page, this only decides where
+     the frame sits in the space it did not ask for.
+     `.bf-card` is unaffected — that frame is height:100%, so there is nothing
+     left over to centre. */
+  #billing-frame-wrap.bf-open {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  #billing-frame {
+    display: block;
+    width: 100%;
+    /* Starting height only — widget-init.js overwrites it from the panel's
+       reported content height. Kept small so a slow panel load does not flash
+       a tall white box over the video. */
+    height: 220px;
+    max-height: 100%;
+    border: 0;
+    background: #fff;
+  }
+
+  /* ── GLASS: a small card floating over the shopper's own blurred camera ──
+     Raised by billing.js when — and only when — the SERVER's directive says
+     `presentation: 'card'` (cooldown, wall, ready). Absent or unrecognised
+     means `sheet`, which is everything above this block: a fielded bundle that
+     has never heard of the field behaves exactly as it does today, and so does
+     the cog-opened panel, which carries no directive at all.
+
+     Why the panel deliberately stays paper — the owner, verbatim: "in the views
+     where this huge info shall be shown it's better to make it full." A price
+     ladder is a browse-and-compare surface and a person moving behind it is
+     noise. A 47-second wait is not; it is the moment the widget most needs to
+     look alive: "it's more alive when they see themselves blurry behind
+     moving."
+
+     Three changes, and each one is load-bearing:
+       1. the wrap stops being opaque white and becomes a translucent SCRIM, so
+          the blurred video reads through it, dimmed enough that white card text
+          keeps its contrast against any garment;
+       2. the iframe goes transparent and FILLS, so the hosted page can center
+          its own card — its height stops being driven by the resize message
+          (hence !important: the message still arrives and is still written
+          inline, and this is what makes it inert for this one treatment). The
+          PANEL is untouched by this and keeps its content-height sizing and its
+          clamp;
+       3. the wrap stops swallowing clicks. The scrim is not the click-blocker —
+          #billing-frame-backdrop is, and it is raised for modal/blocking
+          directives exactly as before. A transparent wrap that ate every click
+          on the visible video would be a worse trap than the sheet it
+          replaced. */
+  #billing-frame-wrap.bf-card {
+    background: rgba(20, 12, 14, 0.34);
+    pointer-events: none;
+    /* The scrim carries the whole arrival. A keyframe rather than a transition
+       because the wrap goes from display:none to display:block in the same
+       frame, and there is no before-change style for a transition to start
+       from. See the blur note below for why the animation lives here and not
+       on the video. */
+    animation: bf-card-in 0.26s ease both;
+  }
+  @keyframes bf-card-in { from { opacity: 0; } to { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) {
+    #billing-frame-wrap.bf-card { animation: none; }
+  }
+  #billing-frame-wrap.bf-card #billing-frame {
+    height: 100% !important;
+    max-height: 100%;
+    background: transparent;
+    pointer-events: auto;
+  }
+
+  /* ── The blur itself ──────────────────────────────────────────────────────
+     THIS CANNOT BE DONE BY THE HOSTED PAGE. `backdrop-filter` only samples its
+     own document's backdrop, and the billing page is a separate document from
+     the one holding <video> — so a frosted-glass card inside the iframe would
+     frost nothing at all. The widget has to blur its own stream. That is the
+     whole reason a presentation flag exists rather than a stylesheet.
+
+     Applied to #main-area so one class covers the local preview, the remote
+     stream and anything that lands between them later.
+
+     The recipe, and why each part earns its cost on a live stream running on a
+     busy retailer page:
+       blur(12px)      enough to make a face unreadable and a garment abstract,
+                       which is the point — the shopper reads presence and
+                       movement, not detail;
+       saturate(1.25)  blur washes colour out; nudging saturation back reads as
+                       a richer, more expensive frost than a heavier blur does,
+                       and costs a fraction of the same visual weight;
+       scale(1.03)     blur samples past the element's edges and finds nothing
+                       there, so an unscaled blur vignettes — a visible dark
+                       rim all the way round. Scaling slightly over-fills the
+                       box and the rim never exists.
+
+     GPU cost: `filter` and `transform` are both composited properties, so this
+     is a shader on a layer the compositor already owns — it does not touch
+     layout or paint, and the video decoder is untouched. `will-change` is
+     deliberately ABSENT: promoting a full-bleed video to a permanent layer
+     costs memory on every widget instance for a state that is up for seconds.
+
+     ⚠ THERE IS NO `transition` ON THE FILTER, AND THAT IS NOT AN OVERSIGHT.
+     The first version had `transition: filter 0.28s ease` and the blur NEVER
+     APPEARED — measured live, not reasoned about: the computed value sat at
+     `blur(0px) saturate(1)` (the interpolation's t=0) indefinitely, and
+     getAnimations() on the element returned an EMPTY list, so no transition
+     was ever running to finish. Transitioning FROM the unset `filter: none`
+     on a <video> painting a live MediaStream is the trigger; #remote-video,
+     display:none at the time and therefore never transitioned, got the full
+     blur correctly in the same breath, which is what made the cause legible.
+     Setting an explicit `filter: blur(0px)` on the base rule would give the
+     transition two real endpoints, but it also promotes BOTH full-bleed videos
+     to their own compositing layer for the entire life of every widget — a
+     permanent cost to animate a state that lasts seconds. So the blur is
+     instant, and the ARRIVAL is animated on the scrim instead (bf-card-in
+     above), which reads as the frost coming in and costs nothing: the wrap is
+     already its own layer. A failure mode of "the feature silently does
+     nothing" is not one to leave to a nicety.
+
+     Both videos are mirrored (`scaleX(-1)`, the base rule above), so the scale
+     is COMPOSED with the flip rather than replacing it — dropping the -1 here
+     would un-mirror the shopper the instant a card opened. The mobile
+     `@media (max-width:768px)` block re-declares `transform: scaleX(-1)` on
+     #remote-video at equal specificity, so this rule is written to outrank it
+     on specificity (two ids + a class) rather than on order.
+
+     REDUCED MOTION keeps the blur — it is not motion, it is the privacy and
+     the focus of the effect — and drops the scale and the scrim's fade, so
+     nothing slides or grows. */
+  #main-area.billing-blur #local-video,
+  #main-area.billing-blur #remote-video {
+    filter: blur(12px) saturate(1.25);
+    transform: scaleX(-1) scale(1.03);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #main-area.billing-blur #local-video,
+    #main-area.billing-blur #remote-video {
+      transform: scaleX(-1);
+    }
+  }
+  /* Floats over the iframe. The panel renders its own close control too, but
+     that one only works once the panel has loaded — this is the escape hatch
+     when it is still loading or failed outright. */
+  #billing-frame-close {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    z-index: 1;
+    background: rgba(255,255,255,0.85);
+    border: none;
+    border-radius: 0;
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+    color: rgba(0,0,0,0.40);
+    font-size: 12px;
+    transition: color 0.15s, background 0.15s;
+  }
+  #billing-frame-close:hover { color: rgba(0,0,0,0.75); background: rgba(255,255,255,1); }
+
+  /* ── Billing backdrop — the ONLY thing a directive's `mode`/`blocking` reach ──
+     Raised by widget-init.js for a `modal` directive, and for any `blocking` one
+     whatever its mode. It dims, and it swallows every click aimed at the widget
+     underneath — that second part is what makes "the user may not continue
+     without acting" true rather than decorative.
+
+     It deliberately does NOT dismiss on click. The sheet above it is a full
+     billing UI including checkout, and this file's existing rule — the ✕ and Esc
+     are the ways out — exists so a stray click on the video cannot throw away a
+     half-completed purchase. A backdrop that dismissed would reintroduce exactly
+     that. When the directive is blocking, ✕ and Esc are gone too and only the
+     server can take it down.
+
+     z-index sits directly under #billing-frame-wrap (200) and above every overlay
+     that can launch it — see the wrap's own z-index note.
+
+     There is NO COPY here and there must never be any: this element exists so
+     that "hard wall or soft wall" is a server-side boolean rather than a Chrome
+     Web Store submission. */
+  #billing-frame-backdrop {
+    display: none;
+    position: absolute;
+    inset: 0;
+    z-index: 199;
+    /* Transparent: the frame now covers everything, so dimming would only be
+       visible as a flash during the transition. Kept in the DOM because it still
+       swallows stray clicks during the swap. */
+    background: transparent;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+  }
+  #billing-frame-backdrop.bfb-on { display: block; opacity: 1; pointer-events: all; }
+
+  /* ── Feedback panel — slides up from above the footer ── */
+  #feedback-panel {
+    display: none;
+    position: absolute;
+    bottom: 38px;
+    left: 10px;
+    right: 10px;
+    z-index: 40;
+    background: rgba(255,255,255,0.96);
+    border-radius: 0;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.18);
+    padding: 10px 10px 8px;
+    pointer-events: all;
+  }
+  #feedback-panel.fp-open { display: flex; flex-direction: column; gap: 7px; }
+  #feedback-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  #feedback-panel-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: rgba(0,0,0,0.65);
+    text-transform: uppercase;
+  }
+  #feedback-panel-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+    color: rgba(0,0,0,0.35);
+    font-size: 14px;
+    transition: color 0.15s;
+  }
+  #feedback-panel-close:hover { color: rgba(0,0,0,0.70); }
+  #feedback-panel textarea {
+    width: 100%;
+    min-height: 52px;
+    resize: vertical;
+    background: rgba(0,0,0,0.04);
+    border: 1px solid rgba(0,0,0,0.12);
+    border-radius: 0;
+    padding: 7px 9px;
+    font-size: 12px;
+    font-family: inherit;
+    color: rgba(0,0,0,0.80);
+    line-height: 1.5;
+    outline: none;
+    box-sizing: border-box;
+  }
+  #feedback-panel textarea:focus { border-color: rgba(0,0,0,0.30); }
+  #feedback-panel-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  #feedback-send-btn {
+    background: #111;
+    color: #fff;
+    border: none;
+    border-radius: 0;
+    padding: 5px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  #feedback-send-btn:hover { background: #333; }
+  #feedback-send-btn:disabled { background: rgba(0,0,0,0.15); cursor: default; }
+  #feedback-sent-msg {
+    font-size: 11px;
+    color: rgba(0,0,0,0.45);
+    display: none;
+  }
+  /* Hide connection indicator text — dot only */
+  #__decart-conn-indicator span:last-child { display: none !important; }
+
+  /*
+   * ── Inner header visibility ────────────────────────────────────────────────
+   * In pane mode the outer title bar (widget-core.js paneTitleBar) is the
+   * primary header — same height (54 px), same text, same glass blur.
+   * The inner #header is redundant there and was previously hidden by an
+   * inline-style set inside the DECART_PANE_MODE handler AFTER the iframe
+   * loaded, causing a visible flash of the duplicate title row.
+   *
+   * Fix: hide #header by CSS default (no flash); widget-init.js adds
+   * body.fs-mode only when DECART_FULLSCREEN_MODE fires, which is when the
+   * outer title bar disappears and the inner header becomes the only chrome.
+   */
+  #header { display: none !important; }
+  body.fs-mode #header { display: flex !important; }
+
+</style>
+</head>
+<body>
+<div id="root">
+
+  <!-- Header — glass overlay on top of the video feed -->
+  <div id="header">
+    <span id="status-badge">Loading...</span>
+    <div id="widget-title">
+      <a id="anywear-title-link" href="https://tryanywear.ai/" target="_blank" rel="noopener noreferrer"
+         aria-label="Anywear — open tryanywear.ai"><span id="anywear-title-wordmark">Anywear</span></a>
+      <span id="widget-title-sep" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.8 7.2L21 12l-7.2 1.8L12 21l-1.8-7.2L3 12l7.2-1.8z"></path><path d="M19 3l.7 1.8L21.5 5.5l-1.8.7L19 8l-.7-1.8L16.5 5.5l1.8-.7z"></path></svg></span>
+      <span id="widget-title-subtext">Virtual Try-On</span>
+    </div>
+  </div>
+
+  <!-- Main area — fills the entire root so the video is full-bleed -->
+  <div id="main-area" class="ma-idle">
+
+    <video id="local-video"  autoplay playsinline muted></video>
+    <video id="remote-video" autoplay playsinline></video>
+
+    <div id="anywear-watermark" aria-label="Live Dressing AI">
+      <span style="font-size:11px; font-weight:600; color:#ffd778; letter-spacing:0.04em; background:rgba(0,0,0,0.4); padding:3px 8px; border-radius:12px;">Live Dressing</span>
+    </div>
+
+    <!--
+      Try-ons left — over-video instance
+      ─────────────────────────────────
+      Empty and invisible until widget-init.js fills it from /status. Shown for
+      ~2s after a try-on ends, and pinned open once the balance is low. The digit
+      is server-computed and frozen for the duration of a try-on — see the
+      counter section in widget-init.js before changing anything here.
+      aria-hidden: it duplicates the footer badge, which is inside a real button.
+    -->
+    <div id="tryons-flash" aria-hidden="true">
+      <svg width="13" height="13" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M13.5 2 4 13.4h6.05L9.8 22 20 10.6h-6.45z" fill="currentColor"/>
+      </svg>
+      <span id="tryons-flash-n"></span>
+    </div>
+
+    <!-- Shimmer (applied while AI is processing a product image) -->
+    <div id="shimmer">
+      <div class="shine1"></div>
+      <div class="shine2"></div>
+    </div>
+
+    <!-- Idle placeholder (shown before camera is activated) -->
+    <div id="idle-placeholder">
+      <div id="camera-btn-wrap">
+        <button id="camera-btn">Enable Camera</button>
+      </div>
+      <nav id="idle-legal" aria-label="Legal">
+        <span>Powered by Live Dressing AI</span>
+      </nav>
+    </div>
+
+    <!-- Connecting overlay (shown while AI stream is initialising) -->
+    <div id="connecting-overlay" style="display:none">
+      <div class="spinner"></div>
+      <p id="connecting-msg">Loading...</p>
+      <!-- Queue card — widget.bundle.js toggles .queue-active on the overlay
+           and fills these while the server reports a queue position -->
+      <div id="queue-card">
+        <div class="spinner"></div>
+        <!-- Optional server-named waiting animation (loader_asset). src is set
+             at render time and only from the queue endpoint's own origin. -->
+        <img id="queue-loader-img" alt="" aria-hidden="true">
+        <!-- Lane chip and lane note. EMPTY BY DESIGN — every word comes from
+             the poll response (lane_label / lane_note). Do not put a lane name,
+             "fast", "premium" or any other copy in this file. -->
+        <span id="queue-lane-label"></span>
+        <p id="connecting-queue-pos"></p>
+        <p id="connecting-queue-eta"></p>
+        <p id="queue-lane-note"></p>
+        <!-- Purchase-intent probe while waiting in line. Click swaps the button
+             for the coming-soon note (queue wait continues unaffected) and logs
+             via window.__decartTrackPurchaseIntent('queue_card'). -->
+        <!-- FALLBACK LABEL ONLY. The server sends `cta_text` (with the price
+             from the live Stripe catalog) and the queue-rendering code
+             overwrites this; this string is what an older backend shows.
+             It must stay TRUE with no price in it: the previous label promised
+             "unlimited sessions", and there is no unlimited product — $2 buys a
+             pack of try-ons. Never put "unlimited", a price or a plan name
+             here; both belong to the server (widget-contract.md §6). -->
+        <button class="session-action-btn" id="queue-purchase-credits">Skip the wait</button>
+        <p id="queue-purchase-note">Subscription plans are coming soon…<br>Please wait…</p>
+      </div>
+    </div>
+
+    <!--
+      Server-error overlay
+      ─────────────────────
+      Hidden by default. Shown by widget.bundle.js when the Decart token endpoint
+      returns an error (servers overloaded, 4xx / 5xx). The camera stream stays
+      live so clicking "Try Again" reconnects instantly without re-requesting
+      camera permission.
+    -->
+    <div id="server-error-overlay" style="display:none">
+      <!-- Close: dismisses the BUSY message and returns to the widget. The
+           bundle hides this for the permanent unavailable card. -->
+      <button id="server-error-close-btn" aria-label="Close" title="Close">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+          <path d="M6 6l12 12M18 6 6 18"/>
+        </svg>
+      </button>
+      <!-- Cloud / signal-off icon -->
+      <div class="server-error-icon">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 10a6 6 0 0 0-12 0c0 .34.03.67.08 1"/>
+          <path d="M6 15a6 6 0 0 0 3.5 5.5"/>
+          <line x1="3" y1="3" x2="21" y2="21"/>
+        </svg>
+      </div>
+      <p class="server-error-title">Servers Busy</p>
+      <p id="server-error-sub" class="server-error-sub">Too many people are trying the experience right now. Please try again in a moment.</p>
+      <div class="server-error-actions">
+        <button id="server-error-retry-btn" class="session-action-btn">Try Again</button>
+        <!-- Paywall CTA — shown only for the subscription_required token code
+             (__decartUnavailable in the bundle); logs purchase intent. -->
+        <button id="paywall-subscribe-btn" class="session-action-btn" style="display:none">Pay now</button>
+        <!-- "Talk to an expert" — the ONLY way forward on the permanent
+             site-level card (origin_not_registered / account_disabled), where
+             retry and the ✕ are both hidden on purpose. It is aimed at the
+             merchant, not the shopper, hence the hint line above it.
+
+             An <a>, not a <button>: a real link click opens a new tab from
+             inside the widget iframe in BOTH contexts (extension and web
+             embed) without tripping a popup blocker, which window.open() from
+             an iframe can. The href here is the production fallback — the
+             bundle rewrites it at show time so local/staging backends point at
+             their own /contact, and so `from` names which of the two site
+             codes sent the merchant. Keep the params in sync there. -->
+        <p id="unavailable-contact-hint" style="display:none">Are you the site owner?</p>
+        <a id="unavailable-contact-btn" class="session-action-btn"
+           href="#" style="display:none">Contact Support</a>
+      </div>
+    </div>
+
+    <!-- Bottom zone (try-on button, drag hint, buy-now link) -->
+    <div id="bottom-zone" style="display:none"></div>
+
+    <!-- Drag overlay (shown while user is dragging an image over the widget) -->
+    <div id="drag-overlay" style="display:none">
+      <div id="drag-overlay-label">Drop to Try On</div>
+    </div>
+
+    <!-- camera-btn-wrap moved inside #idle-placeholder so the button sits
+         directly below the headline text rather than at the screen bottom -->
+
+    <!-- Inactivity countdown — visible during a live session, sits above ● Active/Inactive -->
+    <div id="session-countdown">
+      <span id="session-countdown-display">1:00</span>
+      <div class="session-countdown-info-wrap">
+        <button class="session-countdown-info-btn" aria-label="Session limits">ⓘ</button>
+        <div class="session-countdown-tooltip">
+          <span id="session-duration-label">1 min</span> per garment.<br>
+          Drag another garment to restart the clock.
+        </div>
+      </div>
+    </div>
+
+    <!--
+      Session-ended bubble
+      ─────────────────────
+      Compact card shown when the inactivity timer or image cap fires.
+      Centered over the (now-black) stopped video — not full-screen.
+
+      ⚠️ NEVER write "unlimited" or "sessions" here. This card carries 209 of 247
+      pay-clicks, and it read "Pay for unlimited sessions" until 2026-08-11: there
+      is no unlimited product ($2 buys 12 try-ons) and "sessions" is a retired
+      noun. The queue card had already been corrected and this one was missed.
+      Unlike the queue CTA there is no server-supplied override for this label
+      yet, so a wrong word here is frozen until a Chrome Web Store release —
+      which is exactly why it must stay boring and true. The wall behind it owns
+      the price and the offer; this button only has to open it.
+    -->
+    <div id="session-ended-overlay">
+      <p class="session-ended-title">You're out of try-ons.</p>
+      <div class="session-ended-actions">
+        <button class="session-action-btn" id="session-action-queue">Start again</button>
+        <button class="session-action-btn" id="session-action-purchase-credits">Get more try-ons</button>
+      </div>
+      <!-- Recording save link — shown by widget-init.js in showSessionEnded()
+           only when RECORDING_ENABLED and at least one garment was tried.
+           Starts as "Loading..." while the blob assembles, then becomes "Save your session". -->
+      <div id="session-save-wrap">
+        <button class="session-save-btn session-save-loading" id="session-save-btn">Loading...</button>
+      </div>
+    </div>
+
+    <!--
+      Post-session recap
+      ──────────────────
+      The stage between the session ending and what happens next. Shown by
+      showSessionRecap() in widget-init.js on every normal session end that
+      recorded something; "Close" is what then runs the what's-next (closing a
+      garment-summoned widget, or returning an already open one to the drag
+      screen). The full rationale, and why the share lives HERE rather than on
+      the live rail, is in docs/post-session-recap-ux.md.
+
+      The <video> carries `controls` because the ask was a real player — pause,
+      scrub, hold on one frame — and the native control set is the one every
+      shopper already knows how to use, on desktop and on a phone alike.
+      `muted` is not cosmetic: the recording has no audio track at all, and an
+      unmuted <video> is refused autoplay, so the loop would open on a frozen
+      first frame. `loop` because a 60-second session ends before you have
+      finished looking at it.
+    -->
+    <div id="session-recap-overlay">
+      <p class="session-recap-title">Your try-on</p>
+      <div id="session-recap-player">
+        <video id="session-recap-video" playsinline muted loop controls
+               controlslist="nodownload noremoteplayback" disablepictureinpicture></video>
+        <div id="session-recap-status" class="session-recap-waiting">Preparing your video…</div>
+        <button id="session-recap-expand" aria-label="Full screen" title="Full screen">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 3 21 3 21 9"/>
+            <polyline points="9 21 3 21 3 15"/>
+            <line x1="21" y1="3" x2="14" y2="10"/>
+            <line x1="3" y1="21" x2="10" y2="14"/>
+          </svg>
+        </button>
+      </div>
+      <div class="session-recap-actions">
+        <button class="session-action-btn" id="session-recap-close">Close</button>
+        <button class="session-action-btn" id="session-recap-share" disabled>Share with a friend</button>
+      </div>
+    </div>
+
+    <!-- Instagram-style engagement rail — right side, shown only when session is active -->
+    <div class="insta-rail" id="footer-thumbs">
+      <!-- Fullscreen toggle — top of rail -->
+      <button class="session-thumb-btn" id="insta-fullscreen" aria-label="Fullscreen" title="Fullscreen">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 3 21 3 21 9"/>
+          <polyline points="9 21 3 21 3 15"/>
+          <line x1="21" y1="3" x2="14" y2="10"/>
+          <line x1="3" y1="21" x2="10" y2="14"/>
+        </svg>
+      </button>
+      <!-- Share / paper plane -->
+      <button id="session-live-save" aria-label="Share your try-on" title="Share this video with your friends">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"/>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+      </button>
+      <!-- Heart (react positively) -->
+      <button class="session-thumb-btn" id="session-thumb-up" aria-label="Love this look">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+        </svg>
+      </button>
+      <!-- Thumbs down — hidden; negative signal not needed with report-issues link -->
+      <button class="session-thumb-btn" id="session-thumb-down" aria-label="Thumbs down" style="display:none">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3z"/>
+          <path d="M17 2h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/>
+        </svg>
+      </button>
+    </div>
+
+    <!--
+      Billing panel container
+      ───────────────────────
+      Deliberately EMPTY. Everything a shopper sees about billing — plan name,
+      remaining sessions, renewal date, prices, checkout — is rendered by
+      https://anywear.decart.ai/billing/panel inside this iframe, never by the
+      widget. This file ships in the Chrome Web Store package, so any copy or
+      number written here would need a store review to change; the hosted page
+      redeploys in minutes.
+
+      The only markup here is the frame and a close affordance. Do not add
+      billing text to this container. The iframe src is set by widget-init.js at
+      open time (not here) so the panel is not fetched until it is wanted.
+    -->
+    <!-- Dim / click-swallow layer for modal + blocking directives. Sibling of the
+         sheet, not a child, so it can cover the whole widget while the sheet
+         stays anchored to the bottom. Empty by design — see the CSS note. -->
+    <div id="billing-frame-backdrop" aria-hidden="true"></div>
+    <div id="billing-frame-wrap" role="dialog" aria-label="Billing">
+      <button id="billing-frame-close" aria-label="Close">✕</button>
+      <iframe id="billing-frame" title="Billing" frameborder="0"
+              allow="payment"
+              referrerpolicy="no-referrer"></iframe>
+    </div>
+
+    <!-- Feedback panel — triggered by "Report issues" footer link -->
+    <div id="feedback-panel">
+      <div id="feedback-panel-header">
+        <span id="feedback-panel-title">Report / Feedback</span>
+        <button id="feedback-panel-close" aria-label="Close feedback">✕</button>
+      </div>
+      <textarea id="feedback-textarea" rows="2" placeholder="Tell us what happened or what you'd like to improve…"></textarea>
+      <div id="feedback-panel-footer">
+        <span id="feedback-sent-msg">Sent — thanks!</span>
+        <button id="feedback-send-btn">Send</button>
+      </div>
+    </div>
+
+  </div><!-- /main-area -->
+
+  <!-- Footer — disclaimer text only -->
+  <div id="footer">
+    <div class="footer-inner">
+      <div class="footer-text-row">
+        <span class="by">AI can make mistakes ·</span>
+        <a class="brand" id="footer-report-link" href="#">Report issues</a>
+        <!-- Plan / billing. It lives HERE, not in .insta-rail, because that rail
+             is revealed only while a stream is running
+             (#root:has(#main-area.ma-streaming)) — so a shopper could not check
+             their plan, or top up, without first starting a try-on they might
+             not have the balance for. The footer is always on screen.
+             Still hidden until /status says billing_enabled, and hidden forever
+             where there is no installation_id (web/Shopify hosts). -->
+        <span class="by" id="billing-dot">·</span>
+        <button id="session-billing-btn" class="footer-cog"
+                aria-label="Your plan" title="Your plan"
+                aria-haspopup="dialog" aria-expanded="false" style="display:none">
+          <span id="tryons-left" class="tryons-badge">
+            <span id="tryons-left-n"></span>
+          </span>
+        </button>
+        <span class="by" id="manage-dot" style="display:none">·</span>
+        <button id="manage-account-btn" class="brand" style="display:none"
+                aria-label="Manage subscription" title="Manage subscription">Manage account</button>
+    </div>
+  </div>
+
+</div>
+<!--
+  Load order matters:
+    1. config.js          — defines DECART_CONFIG (must come first)
+    2. stream-quality.js  — installs RTCPeerConnection Proxy BEFORE the bundle so
+                             every peer connection the bundle creates is captured.
+                             Also exposes window.__decartSQ.stopRemoteOnly().
+    3. moderation-reset-attempt.js   — patches window.WebSocket BEFORE the bundle so the
+                             SDK's signaling socket is hooked from creation. The
+                             SDK drops unknown message types (content_flag) and
+                             keeps its realtime client module-private, so this
+                             hook is the only seam. MUST precede the bundle.
+    4. widget.bundle.js   — the pre-compiled Decart SDK UI
+    5. billing.js         — the entire billing surface (heartbeat, try-ons counter,
+                             billing_ui directives, the hosted panel, the §3 command
+                             set). MUST precede widget-init.js: it only DEFINES
+                             window.__decartBilling, and widget-init.js calls
+                             .init() from module scope — if that global is missing
+                             when the call runs, billing is silently absent for the
+                             life of the page. Nothing happens at its parse time;
+                             every listener it owns is registered by init(), so this
+                             order is the whole of its activation contract.
+    6. widget-init.js     — our interceptors + session timer (reads DECART_CONFIG,
+                             tears down via stopDecartSession on session end).
+                             Also defines window.__decartTrack, which
+                             moderation-reset-attempt.js resolves lazily at flag time.
+
+    7. moderation-overlay.js — dressing-error overlay; moderation-reset-attempt.js calls its
+                  window.__decartShowDressingError() when it gives up
+-->
+<script src="config.js"></script>
+<script src="logger.js"></script>
+<script src="stream-quality.js"></script>
+<script src="connection-indicator.js"></script>
+<script src="widget-prefetch.js"></script>
+<script src="moderation-reset-attempt.js"></script>
+<script src="widget.bundle.js"></script>
+<script src="recording.js"></script>  <!-- must load before widget-init.js so window.__decartRecording is defined -->
+<script src="billing.js"></script>    <!-- must load before widget-init.js, which calls __decartBilling.init() -->
+<script src="widget-init.js"></script>
+<script src="moderation-overlay.js"></script>
+</body>
+</html>

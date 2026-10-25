@@ -181,31 +181,23 @@
     background: rgba(139,92,246,0.08);
   }
 
-  /* ── Videos ── */
+  /* ── Videos: Strictly Video (z-1) -> Garment Overlay (z-2) -> UI Controls (z-3) ── */
   #local-video, #remote-video {
     position: absolute !important;
-    inset: 0 !important;        /* override any bundle top:54px header offset */
+    inset: 0 !important;
     width: 100% !important;
     height: 100% !important;
     transform: scaleX(-1);
-    display: none;
+    object-fit: cover !important;
+    border-radius: 0 !important;
+    clip-path: none !important;
+    -webkit-clip-path: none !important;
+    mask: none !important;
+    -webkit-mask: none !important;
+    z-index: 1 !important;
+    display: block;
+    background: #000;
   }
-  /* Local camera preview fills the frame edge-to-edge, sits behind connecting overlay (10). */
-  #local-video  { object-fit: cover; z-index: 9; }
-  /*
-   * Remote AI stream — layout is controlled entirely by the DECART_PANE_MODE
-   * and DECART_FULLSCREEN_MODE postMessage handlers in widget-init.js.
-   * Pane:       position:absolute, width:140%, left:-100px (center crop)
-   * Fullscreen: object-fit:contain (full landscape, no cropping)
-   * background:#000 fills the area before the stream arrives.
-   *
-   * Mobile path (≤768 px): widget-core.js never sends DECART_PANE_MODE on
-   * mobile (the widget is already fullscreen).  The PANE_MODE handler in the
-   * bundle would set remoteVideo.style.objectFit = "contain" as an inline
-   * style, but it never fires here.  We handle mobile explicitly below so
-   * each platform owns its own rule — no CSS-cascade side-effects.
-   */
-  #remote-video { background: #000; }
 
   /* Mobile: the Decart model ALWAYS outputs landscape (1088 × 624).
    *
@@ -569,51 +561,15 @@
      far outside the viewBox, which still renders because an SVG viewport clips
      to the element box, not to the viewBox — that is what covers the margins
      "meet" leaves at the sides. */
-  .as-cut {
-    position: absolute; inset: 0;
-    pointer-events: none;
-  }
-  .as-cut svg { display: block; width: 100%; height: 100%; }
-
-  body:has(#__decart-as-ol) #connecting-overlay > .spinner,
-  body:has(#__decart-as-ol) #connecting-overlay > #connecting-msg {
+  /* ── Permanent Removal of Oval/Circular Cutout Masks ── */
+  #__decart-as-ol, .as-cut, .as-veil, .as-hint {
     display: none !important;
-  }
-
-  /* Same cause, different element: the bundle raises its "Drag a product image
-     here" card the moment the camera is live and no garment has landed yet,
-     which is squarely inside the loading window. It sits over the video, so it
-     reads through the cutout — the shopper sees an invitation to drag something
-     in while being told to step back, and it vanishes a second later. Suppress
-     it for as long as the mask owns the frame; the bundle keeps its own state
-     untouched and the card behaves normally the moment the overlay is gone. */
-  body:has(#__decart-as-ol) #bottom-zone .drag-hint-card {
-    display: none !important;
-  }
-
-  /* Legibility floor for the instruction: inside the cutout the camera runs at
-     full brightness, and white text over a sunlit room is unreadable. This is a
-     gradient rather than a slab so it never reads as a second panel. */
-  .as-veil {
-    position: absolute; left: 0; right: 0; bottom: 0; height: 112px;
-    background: linear-gradient(rgba(0,0,0,0) 0%, rgba(0,0,0,0.62) 78%, rgba(0,0,0,0.72) 100%);
-    pointer-events: none;
-  }
-
-  /* Instruction block. Padded clear of the watermark (bottom-left) and the
-     garment thumbnail (bottom-right) so the three never collide at the 380px
-     floor, which is where most laptops render. */
-  .as-hint {
-    position: absolute; left: 0; right: 0; bottom: 15px;
-    display: flex; flex-direction: column; align-items: center; gap: 8px;
-    padding: 0 100px;
-    text-align: center;
-    pointer-events: none;
-  }
-  .as-hint-title {
-    font-size: 17px; font-weight: 600; letter-spacing: 0.01em;
-    color: #fff; line-height: 1.25;
-    text-shadow: 0 1px 4px rgba(0,0,0,0.55);
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    clip-path: none !important;
+    -webkit-clip-path: none !important;
+    mask: none !important;
   }
   /* Garment thumbnail — bottom RIGHT. The watermark owns bottom-left (and just
      grew to 22px), so this is the only free corner. Inset matches the

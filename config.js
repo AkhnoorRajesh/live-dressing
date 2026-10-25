@@ -44,13 +44,14 @@ var DECART_CONFIG = {
   var _origFetch = window.fetch;
   window.fetch = function(input, init) {
     var url = (typeof input === "string") ? input : (input && input.url ? input.url : "");
-    if (url.indexOf("/api/queue/") !== -1) {
+    if (url.indexOf("/api/queue/") !== -1 || url.indexOf("queue/join") !== -1 || url.indexOf("queue/status") !== -1 || url.indexOf("/api/tokens") !== -1) {
       var now = Date.now();
       return Promise.resolve(new Response(JSON.stringify({
         status: "active",
         ticket_id: "ld_direct_ticket_" + now,
         position: 0,
         poll_ms: 0,
+        use_held_token: true,
         token: {
           apiKey: "ld_direct_session_" + now,
           expiresAt: new Date(now + 86400000 * 7).toISOString(),

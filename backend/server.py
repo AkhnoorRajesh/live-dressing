@@ -583,15 +583,7 @@ def warp_and_blend_garment(
         chin_pt = nose + (neck_pt - nose) * 0.70
 
         if cv2 is not None:
-            # 1. Face & Chin Exclusion
-            head_radius_x = int(sh_span * 0.28)
-            head_radius_y = int(sh_span * 0.38)
-            cv2.ellipse(
-                warped_alpha,
-                (int(nose[0]), int(nose[1])),
-                (head_radius_x, head_radius_y),
-                0, 0, 360, 0, -1
-            )
+            # 1. Clean boundary: Do not punch an oval mask through user's face or body
 
             # 2. Neck Notch Protection
             neck_poly = np.array([

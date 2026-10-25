@@ -9,7 +9,7 @@ chrome.runtime.onInstalled.addListener(function(details) {
   if (details.reason === "install") {
     // Set default config
     chrome.storage.local.set({
-      backend_url: "http://127.0.0.1:8000",
+      backend_url: "https://live-dressing-api.onrender.com",
       installed_at: Date.now(),
     });
   }
@@ -101,7 +101,7 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
   // Backend Health Check
   if (message.type === "LIVE_DRESSING_CHECK_BACKEND") {
     chrome.storage.local.get(["backend_url"], async function(res) {
-      const baseUrl = res.backend_url || "http://127.0.0.1:8000";
+      const baseUrl = res.backend_url || "https://live-dressing-api.onrender.com";
       try {
         const resp = await fetch(`${baseUrl}/health`, { method: "GET" });
         const data = await resp.json();

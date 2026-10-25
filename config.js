@@ -1,13 +1,13 @@
 /**
  * Live Dressing - Configuration
- * Directs all virtual try-on requests to your self-hosted backend.
+ * Directs all virtual try-on requests to your live Render backend.
  */
 var LIVE_DRESSING_CONFIG = {
-  BACKEND_URL: "http://127.0.0.1:8000",
-  TRYON_ENDPOINT: "http://127.0.0.1:8000/api/tryon",
-  HEALTH_ENDPOINT: "http://127.0.0.1:8000/health",
+  BACKEND_URL: "https://live-dressing-api.onrender.com",
+  TRYON_ENDPOINT: "https://live-dressing-api.onrender.com/api/tryon",
+  HEALTH_ENDPOINT: "https://live-dressing-api.onrender.com/health",
   WIDGET_SIDE: "left",
-  DEBUG: true,
+  DEBUG: false,
   SHOW_TRYON_BUTTONS_WHEN_WIDGET_CLOSED: true,
 };
 

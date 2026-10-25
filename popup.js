@@ -10,9 +10,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const openWidgetBtn = document.getElementById("open-widget");
   const docsLink = document.getElementById("docs-link");
 
+  const DEFAULT_BACKEND = "https://live-dressing-api.onrender.com";
+
   // Load configured backend URL
   chrome.storage.local.get(["backend_url"], (result) => {
-    const url = result.backend_url || "http://127.0.0.1:8000";
+    const url = result.backend_url || DEFAULT_BACKEND;
     backendInput.value = url;
     docsLink.href = `${url}/docs`;
     checkHealth(url);
@@ -21,10 +23,20 @@ document.addEventListener("DOMContentLoaded", () => {
   // Check backend server health
   async function checkHealth(baseUrl) {
     statusDot.className = "status-dot";
-    statusText.textContent = "Checking...";
+    statusText.textContent = "Connecting...";
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      statusText.textContent = "Waking up server...";
+    }, 2500);
 
     try {
-      const resp = await fetch(`${baseUrl}/health`, { method: "GET" });
+      const resp = await fetch(`${baseUrl}/health`, {
+        method: "GET",
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
       if (resp.ok) {
         const data = await resp.json();
         statusDot.className = "status-dot online";
@@ -34,16 +46,17 @@ document.addEventListener("DOMContentLoaded", () => {
         throw new Error(`HTTP ${resp.status}`);
       }
     } catch (err) {
+      clearTimeout(timeoutId);
       statusDot.className = "status-dot offline";
       statusText.textContent = "Offline";
-      statusText.title = "Run 'python backend/app.py' or check URL";
+      statusText.title = "Verify server URL or check Render dashboard";
     }
   }
 
   // Save Config
   saveBtn.addEventListener("click", () => {
     let newUrl = backendInput.value.trim();
-    if (!newUrl) newUrl = "http://127.0.0.1:8000";
+    if (!newUrl) newUrl = DEFAULT_BACKEND;
     if (newUrl.endsWith("/")) newUrl = newUrl.slice(0, -1);
 
     chrome.storage.local.set({ backend_url: newUrl }, () => {

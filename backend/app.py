@@ -212,11 +212,14 @@ async def api_try_on(payload: TryOnPayload):
 
     # 3. Run Virtual Try-On Pipeline
     try:
-        result_img = run_virtual_tryon(
+        tryon_result = run_virtual_tryon(
             human_image=user_img,
             garment_image=garment_img,
             category=payload.category,
         )
+        result_img = tryon_result["composite"]
+        clean_garment = tryon_result["garment_png"]
+        pos_info = tryon_result["position"]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Model inference error: {str(e)}")
 
@@ -226,11 +229,19 @@ async def api_try_on(payload: TryOnPayload):
     b64_output = base64.b64encode(buffered.getvalue()).decode("utf-8")
     data_uri = f"data:image/jpeg;base64,{b64_output}"
 
+    # 5. Encode clean garment transparent PNG to base64
+    g_buffered = io.BytesIO()
+    clean_garment.save(g_buffered, format="PNG")
+    b64_garment = base64.b64encode(g_buffered.getvalue()).decode("utf-8")
+    garment_uri = f"data:image/png;base64,{b64_garment}"
+
     elapsed_ms = round((time.time() - start_time) * 1000)
 
     return {
         "status": "success",
         "image": data_uri,
+        "garment_png": garment_uri,
+        "position": pos_info,
         "processing_time_ms": elapsed_ms,
         "device": get_system_status()["mode"],
     }

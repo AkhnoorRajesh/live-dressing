@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Virtual Try-On</title>
+<title>Live Dressing</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -651,7 +651,10 @@
     position: absolute;
     inset: 0;
     background: #f7f6f5;
-    display: none; /* flipped to flex by widget.bundle.js */
+    display: none !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
     flex-direction: column;
     align-items: center;
     justify-content: center;

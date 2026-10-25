@@ -3,6 +3,8 @@ Live Dressing - Backend API Server
 Provides high-performance REST endpoints for the 'Live Dressing' Chrome Extension.
 """
 
+import sys
+sys.dont_write_bytecode = True
 import base64
 from datetime import datetime, timezone
 import io

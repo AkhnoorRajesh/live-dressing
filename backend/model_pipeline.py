@@ -9,6 +9,8 @@ Guarantees:
 4. Returns both composite studio photo and isolated transparent PNG with relative body coordinates for Live AR.
 """
 
+import sys
+sys.dont_write_bytecode = True
 import io
 import os
 import requests

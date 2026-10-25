@@ -13,7 +13,10 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from PIL import Image  # type: ignore
+from PIL import Image, ImageFile  # type: ignore
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 
 from model_pipeline import (
     run_virtual_tryon,

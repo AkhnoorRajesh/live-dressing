@@ -9,8 +9,18 @@ document.addEventListener("DOMContentLoaded", () => {
   const saveBtn = document.getElementById("save-config");
   const openWidgetBtn = document.getElementById("open-widget");
   const docsLink = document.getElementById("docs-link");
+  const tabNotice = document.getElementById("tab-notice");
 
   const DEFAULT_BACKEND = "https://live-dressing-api.onrender.com";
+
+  function showNotice(text, isError = true) {
+    if (!tabNotice) return;
+    tabNotice.textContent = text;
+    tabNotice.style.display = "block";
+    tabNotice.style.color = isError ? "#fca5a5" : "#6ee7b7";
+    tabNotice.style.background = isError ? "rgba(239, 68, 68, 0.12)" : "rgba(16, 185, 129, 0.12)";
+    tabNotice.style.borderColor = isError ? "rgba(239, 68, 68, 0.25)" : "rgba(16, 185, 129, 0.25)";
+  }
 
   // Load configured backend URL
   chrome.storage.local.get(["backend_url"], (result) => {
@@ -65,14 +75,40 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // Open Widget in Active Tab
+  // Open Widget in Active Tab safely
   openWidgetBtn.addEventListener("click", () => {
+    if (tabNotice) tabNotice.style.display = "none";
+
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const activeTab = tabs && tabs[0];
-      if (activeTab) {
-        chrome.tabs.sendMessage(activeTab.id, { type: "DECART_POPUP_OPEN" });
+      if (!activeTab || !activeTab.id) {
+        showNotice("No active browser tab found.");
+        return;
       }
-      window.close();
+
+      const url = activeTab.url || "";
+
+      // 1. Restricted browser pages (chrome://, edge://, about:)
+      if (
+        url.startsWith("chrome://") ||
+        url.startsWith("chrome-extension://") ||
+        url.startsWith("edge://") ||
+        url.startsWith("about:") ||
+        url.startsWith("view-source:")
+      ) {
+        showNotice("⚠️ Please open a fashion shopping site (e.g., Zara, Uniqlo) to try on clothes!");
+        return;
+      }
+
+      // 2. Send message with callback to consume runtime.lastError safely
+      chrome.tabs.sendMessage(activeTab.id, { type: "DECART_POPUP_OPEN" }, (response) => {
+        if (chrome.runtime.lastError) {
+          // Content script not yet attached (e.g. page was loaded before extension was loaded)
+          showNotice("🔄 Please refresh this shopping page once to activate Live Dressing!");
+        } else {
+          window.close();
+        }
+      });
     });
   });
 });

@@ -39,8 +39,13 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
   if (message.type === "DECART_POPUP_OPEN_TAB" || message.type === "LIVE_DRESSING_POPUP_OPEN_TAB") {
     chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
       const activeTab = tabs && tabs[0];
-      if (activeTab) {
-        chrome.tabs.sendMessage(activeTab.id, { type: "DECART_POPUP_OPEN" });
+      if (activeTab && activeTab.id) {
+        chrome.tabs.sendMessage(activeTab.id, { type: "DECART_POPUP_OPEN" }, function() {
+          if (chrome.runtime.lastError) {
+            // Safely consume lastError so it does not throw an uncaught promise error
+            void chrome.runtime.lastError;
+          }
+        });
       }
     });
     return false;

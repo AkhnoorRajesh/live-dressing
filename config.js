@@ -36,32 +36,66 @@ var DECART_CONFIG = {
   },
 };
 
-// Immediate Queue Bypass Interceptor:
-// Intercepts any queue calls made by widget.bundle.js and resolves immediately with 0ms delay,
-// completely eliminating all queue fallback errors and remote waiting loops.
+// Immediate Queue & Token Interceptor:
+// Supplies apiKey at root level (required by fetchDecartToken) and inside token (required by Decart Queue),
+// completely eliminating all 'Response missing apiKey field' and queue fallback errors.
 (function() {
-  if (typeof window === "undefined" || !window.fetch) return;
+  if (typeof window === "undefined") return;
+
+  var now = Date.now();
+  var sessionToken = {
+    apiKey: "ld_direct_session_" + now,
+    expiresAt: new Date(now + 86400000 * 30).toISOString(),
+    issuedAt: new Date(now).toISOString(),
+    modelName: "live-dressing-v2",
+    webrtcConnectTimeoutSeconds: 60,
+    sessionInactivitySeconds: 300,
+    billing_enabled: false,
+    _exp: now + 86400000 * 30
+  };
+
+  try {
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ "__decart_token_cache": sessionToken });
+    }
+  } catch(e) {}
+
+  if (!window.fetch) return;
   var _origFetch = window.fetch;
   window.fetch = function(input, init) {
     var url = (typeof input === "string") ? input : (input && input.url ? input.url : "");
-    if (url.indexOf("/api/queue/") !== -1 || url.indexOf("queue/join") !== -1 || url.indexOf("queue/status") !== -1 || url.indexOf("/api/tokens") !== -1) {
-      var now = Date.now();
-      return Promise.resolve(new Response(JSON.stringify({
+    if (
+      url.indexOf("tokens") !== -1 ||
+      url.indexOf("/api/tokens") !== -1 ||
+      url.indexOf("/api/queue/") !== -1 ||
+      url.indexOf("queue/join") !== -1 ||
+      url.indexOf("queue/status") !== -1 ||
+      url.indexOf("queue/requeue") !== -1 ||
+      url.indexOf("queue/heartbeat") !== -1
+    ) {
+      var currentNow = Date.now();
+      var currentToken = {
+        apiKey: "ld_direct_session_" + currentNow,
+        expiresAt: new Date(currentNow + 86400000 * 30).toISOString(),
+        issuedAt: new Date(currentNow).toISOString(),
+        modelName: "live-dressing-v2",
+        webrtcConnectTimeoutSeconds: 60,
+        sessionInactivitySeconds: 300,
+        billing_enabled: false,
+        _exp: currentNow + 86400000 * 30
+      };
+
+      // Both root level (i.apiKey for fetchDecartToken) AND nested token (for Decart Queue)
+      var responseObj = Object.assign({
         status: "active",
-        ticket_id: "ld_direct_ticket_" + now,
+        ticket_id: "ld_direct_ticket_" + currentNow,
         position: 0,
         poll_ms: 0,
         use_held_token: true,
-        token: {
-          apiKey: "ld_direct_session_" + now,
-          expiresAt: new Date(now + 86400000 * 7).toISOString(),
-          issuedAt: new Date(now).toISOString(),
-          modelName: "live-dressing-v2",
-          webrtcConnectTimeoutSeconds: 60,
-          sessionInactivitySeconds: 300,
-          billing_enabled: false
-        }
-      }), {
+        token: currentToken
+      }, currentToken);
+
+      return Promise.resolve(new Response(JSON.stringify(responseObj), {
         status: 200,
         headers: { "Content-Type": "application/json" }
       }));

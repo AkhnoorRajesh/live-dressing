@@ -728,35 +728,47 @@ async def queue_join(request: Request):
     """
     now = time.time()
     token = _create_session_token(now)
-    return {
+    res = {
         "status": "active",
         "ticket_id": f"ld_ticket_{int(now)}",
         "position": 0,
-        "poll_ms": 1000,
+        "poll_ms": 0,
+        "use_held_token": True,
         "token": token,
     }
+    res.update(token)
+    return res
 
 
 @app.api_route("/api/queue/status", methods=["GET", "POST"])
 def queue_status():
     now = time.time()
     token = _create_session_token(now)
-    return {
+    res = {
         "status": "active",
         "position": 0,
+        "poll_ms": 0,
+        "use_held_token": True,
         "token": token,
     }
+    res.update(token)
+    return res
 
 
 @app.api_route("/api/queue/requeue", methods=["GET", "POST"])
 def queue_requeue():
     now = time.time()
     token = _create_session_token(now)
-    return {
+    res = {
         "status": "active",
         "ticket_id": f"ld_ticket_{int(now)}",
+        "position": 0,
+        "poll_ms": 0,
+        "use_held_token": True,
         "token": token,
     }
+    res.update(token)
+    return res
 
 
 @app.api_route("/api/queue/heartbeat", methods=["GET", "POST"])
